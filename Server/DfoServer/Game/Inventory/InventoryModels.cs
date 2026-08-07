@@ -153,6 +153,9 @@ namespace DfoServer.Game.Inventory
         public bool PetSatietyChanged { get; set; }
 
         public bool NameTagEquipped { get; set; }
+
+        // 购买奖励因背包溢出转邮件时置 true，客户端只需要邮箱提醒。
+        public bool DeliveredByMail { get; set; }
     }
 
     public enum PersonalCargoUpgradeTicketStatus

@@ -290,7 +290,7 @@ namespace DfoServer.Game.Inventory
         {
             rarity = -1;
             if (!ItemMetadataResolver.TryLoadStackableFile(itemId, out card)
-                || !string.Equals(card.ItemCategory, "monster card", StringComparison.OrdinalIgnoreCase)
+                || !ItemMetadataResolver.IsMonsterCard(card)
                 || card.Rarity < 0 || card.Rarity > 3)
                 return false;
             rarity = card.Rarity;

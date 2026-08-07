@@ -1,5 +1,6 @@
 using DfoServer.GameWorld;
 using DfoServer.Game.ItemUpgrade;
+using DfoServer.Infrastructure;
 using PvfLib;
 using System;
 using System.Collections.Concurrent;
@@ -649,11 +650,7 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            if (bead.MonsterCardId > 0)
-                enchantCardItemId = bead.MonsterCardId;
-            else if (bead.EnchantIndex > 0)
-                enchantCardItemId = bead.EnchantIndex;
-            else
+            if (!TryResolveBeadEnchantCardId(bead, out enchantCardItemId, out var requiresCardValidation))
             {
                 rejectReason = "bead has no monster card id/enchant index";
                 return false;
@@ -666,6 +663,14 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            if (bead.BeadLimitedUsableItemIds != null
+                && bead.BeadLimitedUsableItemIds.Count > 0
+                && !bead.BeadLimitedUsableItemIds.Contains(targetItemTemplateId))
+            {
+                rejectReason = "target item id is not allowed by bead limited usable item";
+                return false;
+            }
+
             if (!TryGetEquipmentType(targetItemTemplateId, out var targetEquipmentType))
             {
                 rejectReason = "target is not found in equipment.lst";
@@ -673,18 +678,16 @@ namespace DfoServer.Game.Inventory
             }
 
             StackableItemFile card = null;
-            if (bead.MonsterCardId > 0)
+            if (requiresCardValidation)
             {
-                if (!TryLoadStackable(bead.MonsterCardId, out card))
+                if (!TryLoadStackable(enchantCardItemId, out card))
                 {
                     rejectReason = "monster card is not found in stackable.lst";
                     return false;
                 }
             }
             else
-            {
                 TryLoadStackable(enchantCardItemId, out card);
-            }
 
             if (card != null
                 && !TryValidateMonsterCardTargetMetadata(
@@ -745,11 +748,7 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            if (bead.MonsterCardId > 0)
-                enchantCardItemId = bead.MonsterCardId;
-            else if (bead.EnchantIndex > 0)
-                enchantCardItemId = bead.EnchantIndex;
-            else
+            if (!TryResolveBeadEnchantCardId(bead, out enchantCardItemId, out var requiresCardValidation))
             {
                 rejectReason = "bead has no monster card id/enchant index";
                 return false;
@@ -761,19 +760,25 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
-            StackableItemFile card = null;
-            if (bead.MonsterCardId > 0)
+            if (bead.BeadLimitedUsableItemIds != null
+                && bead.BeadLimitedUsableItemIds.Count > 0
+                && !bead.BeadLimitedUsableItemIds.Contains(targetItemTemplateId))
             {
-                if (!TryLoadStackable(bead.MonsterCardId, out card))
+                rejectReason = "target item id is not allowed by bead limited usable item";
+                return false;
+            }
+
+            StackableItemFile card = null;
+            if (requiresCardValidation)
+            {
+                if (!TryLoadStackable(enchantCardItemId, out card))
                 {
                     rejectReason = "monster card is not found in stackable.lst";
                     return false;
                 }
             }
             else
-            {
                 TryLoadStackable(enchantCardItemId, out card);
-            }
 
             if (card != null
                 && !TryValidateMonsterCardTargetMetadata(
@@ -826,6 +831,57 @@ namespace DfoServer.Game.Inventory
                 rejectReason = $"monster card has no enchant table for upgraded {upgradedItemName}";
                 return false;
             }
+            return true;
+        }
+
+        private static bool TryResolveBeadEnchantCardId(
+            StackableItemFile bead,
+            out int enchantCardItemId,
+            out bool requiresCardValidation)
+        {
+            enchantCardItemId = 0;
+            requiresCardValidation = false;
+            if (bead == null)
+                return false;
+
+            if (TryPickMonsterCardId(bead, out enchantCardItemId))
+            {
+                requiresCardValidation = true;
+                return true;
+            }
+
+            if (bead.EnchantIndex > 0)
+            {
+                enchantCardItemId = bead.EnchantIndex;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryPickMonsterCardId(StackableItemFile bead, out int monsterCardItemId)
+        {
+            monsterCardItemId = 0;
+            if (bead == null)
+                return false;
+
+            var candidates = new List<int>();
+            if (bead.MonsterCardIds != null)
+            {
+                foreach (var itemId in bead.MonsterCardIds)
+                {
+                    if (itemId > 0)
+                        candidates.Add(itemId);
+                }
+            }
+            if (candidates.Count == 0 && bead.MonsterCardId > 0)
+                candidates.Add(bead.MonsterCardId);
+            if (candidates.Count == 0)
+                return false;
+
+            monsterCardItemId = candidates.Count == 1
+                ? candidates[0]
+                : candidates[ServerRandom.Next(candidates.Count)];
             return true;
         }
 
@@ -900,13 +956,35 @@ namespace DfoServer.Game.Inventory
                     || char.IsWhiteSpace(normalized[category.Length]));
         }
 
+        internal static bool IsMonsterCard(StackableItemFile card)
+        {
+            return card != null && IsMonsterCardCategory(card.ItemCategory);
+        }
+
+        internal static bool IsMonsterCardBead(StackableItemFile bead)
+        {
+            if (bead == null)
+                return false;
+
+            if (bead.MonsterCardIds != null)
+            {
+                foreach (var itemId in bead.MonsterCardIds)
+                {
+                    if (itemId > 0)
+                        return true;
+                }
+            }
+
+            return bead.MonsterCardId > 0;
+        }
+
         internal static bool IsEnchanterCard(StackableItemFile card)
         {
             if (card == null)
                 return false;
 
             var stackableType = NormalizeItemCategory(card.StackableType);
-            return IsMonsterCardCategory(card.ItemCategory)
+            return IsMonsterCard(card)
                 || (string.Equals(
                         stackableType,
                         "[material expert job] 1",

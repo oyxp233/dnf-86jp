@@ -596,6 +596,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             if (!pickup.Success)
             {
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] GET_ITEM: {pickup.FailReason} srcSlot={req.SrcSlot}");
+                if (pickup.FailReason == PickupFailReason.InventoryFull)
+                {
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01,
+                        0x002B,
+                        new byte[] { 0x00, 0x04 }));
+                }
                 return;
             }
 

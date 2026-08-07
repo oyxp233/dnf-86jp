@@ -60,27 +60,46 @@ namespace DfoServer.Network.Handlers.Dungeon
             var tutorialRunIdentity = tutorialRun?.CaptureIdentity() ?? default;
             uint flagIndex = BitConverter.ToUInt32(body, 0);
             byte rewardFlag = body[4];
+            var activeCharacterId = session.Player.CharacterId;
+            var tutorialCharacterId = activeCharacterId > 0
+                ? activeCharacterId
+                : session.PendingReturnSelectCharacterId;
+            SelectCharacterInitializationSnapshot tutorialSnapshot = null;
+            var tutorialSkipAlreadySaved = false;
+            if (flagIndex == 31 && tutorialCharacterId > 0)
+            {
+                tutorialSnapshot = new SelectCharacterInitializationSnapshot();
+                _svc.CharacterStateRepository.LoadFlags(tutorialCharacterId, tutorialSnapshot);
+                tutorialSkipAlreadySaved = tutorialSnapshot.AckTutorialSkipable == 1;
+            }
 
-            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: flagIndex={flagIndex} rewardFlag={rewardFlag} dungeon={(session.Player.CurrentRun?.DungeonId ?? 0)} cid={session.Player.CharacterId}");
+            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: flagIndex={flagIndex} rewardFlag={rewardFlag} dungeon={(session.Player.CurrentRun?.DungeonId ?? 0)} cid={activeCharacterId} pendingCid={session.PendingReturnSelectCharacterId}");
 
             // RewardTutorial: PVF serverparameter.etc [escalade tutorial reward]
             var inserted = new List<(short slot, int itemId, int count)>();
-            if (rewardFlag != 0)
+            if (rewardFlag != 0 && !tutorialSkipAlreadySaved)
             {
-                var rewards = TutorialRewardProvider.GetRewards(flagIndex);
-                if (rewards != null)
+                if (flagIndex == 31 && activeCharacterId <= 0)
                 {
-                    foreach (var r in rewards)
+                    FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag=31 skipped because no active character is available after returning to selection");
+                }
+                else
+                {
+                    var rewards = TutorialRewardProvider.GetRewards(flagIndex);
+                    if (rewards != null)
                     {
-                        short slot;
-                        if (TryGrantTutorialReward(session, r.ItemId, r.Count, out slot))
+                        foreach (var r in rewards)
                         {
-                            inserted.Add((slot, r.ItemId, r.Count));
-                            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag={flagIndex} gave item {r.ItemId} x{r.Count} -> slot {slot}");
-                        }
-                        else
-                        {
-                            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag={flagIndex} FAILED to insert item {r.ItemId}");
+                            short slot;
+                            if (TryGrantTutorialReward(session, r.ItemId, r.Count, out slot))
+                            {
+                                inserted.Add((slot, r.ItemId, r.Count));
+                                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag={flagIndex} gave item {r.ItemId} x{r.Count} -> slot {slot}");
+                            }
+                            else
+                            {
+                                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] RewardTutorial: flag={flagIndex} FAILED to insert item {r.ItemId}");
+                            }
                         }
                     }
                 }
@@ -101,13 +120,27 @@ namespace DfoServer.Network.Handlers.Dungeon
             // flagIndex==31: tutorial complete -> return to town (only when in dungeon, df_game_r: state>1 + giveup_game)
             if (flagIndex == 31)
             {
-                var cid = session.Player.CharacterId;
-                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: tutorial complete (flag=31), marking skip. cid={cid}");
+                var cid = tutorialCharacterId;
+                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: tutorial complete (flag=31), marking skip. cid={cid} pendingCid={session.PendingReturnSelectCharacterId}");
 
-                var snap = new SelectCharacterInitializationSnapshot();
-                _svc.CharacterStateRepository.LoadFlags(cid, snap);
-                snap.AckTutorialSkipable = 1;
-                _svc.CharacterStateRepository.SaveFlags(cid, snap);
+                if (cid <= 0)
+                {
+                    FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: skip persist because no character context is available. pendingCid={session.PendingReturnSelectCharacterId}");
+                    return;
+                }
+
+                tutorialSnapshot ??= new SelectCharacterInitializationSnapshot();
+                if (tutorialSnapshot.AckTutorialSkipable != 1)
+                {
+                    tutorialSnapshot.AckTutorialSkipable = 1;
+                    _svc.CharacterStateRepository.SaveFlags(cid, tutorialSnapshot);
+                }
+                else
+                {
+                    FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: tutorial skip already persisted. cid={cid}");
+                }
+
+                session.PendingReturnSelectCharacterId = 0;
 
                 if (tutorialRun != null
                     && session.Player.IsCurrentDungeonRun(tutorialRunIdentity))

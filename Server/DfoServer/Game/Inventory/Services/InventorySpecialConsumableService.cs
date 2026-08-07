@@ -514,7 +514,7 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
-        private static bool TryPlanDirectRewards(
+        internal static bool TryPlanDirectRewards(
             InventoryService planningInventory,
             IReadOnlyList<InventoryRewardGrantRequest> requests,
             out InventoryRewardGrantBatchPlan directPlan,
@@ -531,21 +531,156 @@ namespace DfoServer.Game.Inventory
 
             foreach (var request in requests)
             {
-                if (InventoryRewardGrantService.TryPlanBatch(
+                if (TryPlanAndReserveRewardRequest(
                         planningInventory,
-                        new[] { request },
-                        out var singlePlan)
-                    && ReservePlanOnPlanningInventory(planningInventory, singlePlan))
+                        request,
+                        out var singlePlan,
+                        out var error))
                 {
-                    foreach (var entry in singlePlan.Entries)
-                        directPlan.AddEntry(entry);
+                    AddPlanEntries(directPlan, singlePlan);
                     continue;
                 }
 
-                overflowRewards.Add(request);
+                if (error != InventoryRewardGrantError.InsertPlanFailed)
+                    return false;
+
+                var requestedCount = ResolveRewardRequestCount(request);
+                if (requestedCount <= 1)
+                {
+                    overflowRewards.Add(CloneRewardRequest(request, Math.Max(1, requestedCount)));
+                    continue;
+                }
+
+                var directCount = FindLargestPlannableRewardCount(planningInventory, request, requestedCount);
+                if (directCount > 0)
+                {
+                    var directRequest = CloneRewardRequest(request, directCount);
+                    if (!TryPlanAndReserveRewardRequest(
+                            planningInventory,
+                            directRequest,
+                            out var partialPlan,
+                            out _))
+                        return false;
+
+                    AddPlanEntries(directPlan, partialPlan);
+                }
+
+                var overflowCount = requestedCount - directCount;
+                if (overflowCount > 0)
+                    overflowRewards.Add(CloneRewardRequest(request, overflowCount));
             }
 
             return true;
+        }
+
+        private static bool TryPlanAndReserveRewardRequest(
+            InventoryService planningInventory,
+            InventoryRewardGrantRequest request,
+            out InventoryRewardGrantBatchPlan plan,
+            out InventoryRewardGrantError error)
+        {
+            plan = null;
+            error = InventoryRewardGrantError.None;
+            if (!InventoryRewardGrantService.TryPlanBatch(
+                    planningInventory,
+                    new[] { request },
+                    out plan)
+                || plan == null
+                || !plan.Success)
+            {
+                error = plan != null ? plan.Error : InventoryRewardGrantError.InvalidRequest;
+                return false;
+            }
+
+            if (!ReservePlanOnPlanningInventory(planningInventory, plan))
+            {
+                error = InventoryRewardGrantError.InsertPlanFailed;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static int ResolveRewardRequestCount(InventoryRewardGrantRequest request)
+        {
+            var count = request != null ? request.Count : 0;
+            if (count <= 0 && request != null && request.UseExistingCore && request.Core != null)
+                count = InventoryStackRuleService.NormalizeInsertCount(request.Core, count);
+
+            return count;
+        }
+
+        private static int FindLargestPlannableRewardCount(
+            InventoryService planningInventory,
+            InventoryRewardGrantRequest request,
+            int requestedCount)
+        {
+            var low = 1;
+            var high = Math.Max(0, requestedCount);
+            var best = 0;
+            while (low <= high)
+            {
+                var mid = low + ((high - low) / 2);
+                if (CanPlanRewardRequestCount(planningInventory, request, mid))
+                {
+                    best = mid;
+                    low = mid + 1;
+                    continue;
+                }
+
+                high = mid - 1;
+            }
+
+            return best;
+        }
+
+        private static bool CanPlanRewardRequestCount(
+            InventoryService planningInventory,
+            InventoryRewardGrantRequest request,
+            int count)
+        {
+            if (count <= 0)
+                return false;
+
+            var candidate = CloneRewardRequest(request, count);
+            return InventoryRewardGrantService.TryPlanBatch(
+                    planningInventory,
+                    new[] { candidate },
+                    out var plan)
+                && plan != null
+                && plan.Success;
+        }
+
+        private static InventoryRewardGrantRequest CloneRewardRequest(
+            InventoryRewardGrantRequest request,
+            int count)
+        {
+            if (request == null)
+                return null;
+
+            count = Math.Max(1, count);
+            return request.UseExistingCore
+                ? InventoryRewardGrantRequest.Existing(
+                    request.Core?.Copy(),
+                    count,
+                    request.Reason,
+                    request.CreateOptions)
+                : InventoryRewardGrantRequest.Create(
+                    request.ItemTemplateId,
+                    count,
+                    request.Reason,
+                    request.CreateOptions);
+        }
+
+        private static void AddPlanEntries(
+            InventoryRewardGrantBatchPlan target,
+            InventoryRewardGrantBatchPlan source)
+        {
+            if (target == null || source == null)
+                return;
+
+            foreach (var entry in source.Entries)
+                target.AddEntry(entry);
         }
 
         private static bool ReservePlanOnPlanningInventory(

@@ -276,8 +276,10 @@ namespace PvfLib
         public string NeedSkill { get; set; }
         public string NeedMaterial { get; set; }
         public int MonsterCardId { get; set; } = -1;
+        public List<int> MonsterCardIds { get; set; } = new List<int>();
         public int MonsterCardBind { get; set; } = -1;
         public List<int> TargetItemIds { get; set; } = new List<int>();
+        public List<int> BeadLimitedUsableItemIds { get; set; } = new List<int>();
 
         #endregion
 
@@ -407,9 +409,15 @@ namespace PvfLib
                     case "input item": stk.InputItem = data; break;
                     case "need skill": stk.NeedSkill = data; break;
                     case "need material": stk.NeedMaterial = data; break;
-                    case "monster card id": stk.MonsterCardId = ParseInt(data); break;
+                    case "monster card id":
+                    {
+                        stk.MonsterCardIds = ParseIntList(node, content);
+                        stk.MonsterCardId = ResolveFirstPositive(stk.MonsterCardIds, ParseInt(data));
+                        break;
+                    }
                     case "monstercard bind": stk.MonsterCardBind = ParseInt(data); break;
                     case "target item id": stk.TargetItemIds = ParseIntList(node, content); break;
+                    case "bead limited usable item": stk.BeadLimitedUsableItemIds = ParseIntList(node, content); break;
 
                     
                     case "physical attack": stk.PhysicalAttack = ParseInt(data); break;
@@ -1076,6 +1084,20 @@ namespace PvfLib
         private static List<int> ParseIntList(ScriptNode node, string content)
         {
             return PvfScriptValueReader.ReadIntegers(node, content);
+        }
+
+        private static int ResolveFirstPositive(List<int> values, int fallback)
+        {
+            if (values != null)
+            {
+                foreach (var value in values)
+                {
+                    if (value > 0)
+                        return value;
+                }
+            }
+
+            return fallback;
         }
 
         private static UpgradeLimitCubeInfo ParseUpgradeLimitCubeInfo(

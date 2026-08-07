@@ -286,6 +286,7 @@ namespace DfoServer.Network.Handlers
             byte[] body)
         {
             _dungeonRejoin.ClearSession(session.SessionId);
+            session.PendingReturnSelectCharacterId = 0;
             var selectedCharacterId = ResolveSelectedCharacterId(
                 session,
                 body);
@@ -387,6 +388,7 @@ namespace DfoServer.Network.Handlers
             var characterId = session.Player?.CharacterId ?? 0;
             if (characterId <= 0)
             {
+                session.PendingReturnSelectCharacterId = 0;
                 await _characterSelectHandler
                     .Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(
                         session,
@@ -439,6 +441,7 @@ namespace DfoServer.Network.Handlers
                     session.SessionId,
                     characterId);
                 session.GameSession = null;
+                session.PendingReturnSelectCharacterId = characterId;
                 await _characterSelectHandler
                     .Handle_ENUM_CMDPACKET_RETURN_SELECT_CHARACTER(
                         session,
@@ -547,6 +550,7 @@ namespace DfoServer.Network.Handlers
                     session.SessionId,
                     characterId);
                 session.GameSession = null;
+                session.PendingReturnSelectCharacterId = characterId;
                 EnterCharacterSelectionState(session);
                 return true;
             }

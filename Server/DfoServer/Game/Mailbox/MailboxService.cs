@@ -52,6 +52,22 @@ namespace DfoServer.Game.Mailbox
             }
         }
 
+        internal MailboxSendResult SendSystemMails(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            IReadOnlyList<MailboxSendRequest> requests)
+        {
+            try
+            {
+                return _repository.SendSystemMails(connection, transaction, requests);
+            }
+            catch (SqliteException ex) when (IsDatabaseBusy(ex))
+            {
+                FileLogger.Log($"[Mailbox] SYSTEM_SEND database busy sqlite={ex.SqliteErrorCode}/{ex.SqliteExtendedErrorCode}");
+                return MailboxSendResult.Fail(MailboxSendError.ServerBusy);
+            }
+        }
+
         public MailboxCampaignBatchResult ProcessSystemMailCampaignBatch(
             string campaignId,
             MailboxSendRequest template,

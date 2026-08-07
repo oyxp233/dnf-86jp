@@ -133,6 +133,27 @@ namespace DfoServer.Game.Mailbox
             }
         }
 
+        internal MailboxSendResult SendSystemMails(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            IReadOnlyList<MailboxSendRequest> requests)
+        {
+            if (connection == null || transaction == null || requests == null || requests.Count == 0)
+                return MailboxSendResult.Fail(MailboxSendError.InvalidRequest);
+
+            MailboxSendResult last = null;
+            foreach (var request in requests)
+            {
+                var result = SendSystemMail(connection, transaction, request);
+                if (!result.Success)
+                    return result;
+
+                last = result;
+            }
+
+            return last ?? MailboxSendResult.Fail(MailboxSendError.InvalidRequest);
+        }
+
         public IReadOnlyList<MailboxListEntry> LoadInbox(int characterId, int limit)
         {
             return LoadInboxPage(characterId, limit).Entries;

@@ -337,9 +337,8 @@ namespace DfoServer.Game.ExpertJob
                     if (cardItemId <= 0
                         || beadItemId <= 0
                         || config.BeadItemIdByCardItemId.ContainsKey(cardItemId)
-                        || (bead != null
-                            && bead.MonsterCardId > 0
-                            && bead.MonsterCardId != cardItemId))
+                        || (ItemMetadataResolver.IsMonsterCardBead(bead)
+                            && !BeadContainsCardId(bead, cardItemId)))
                     {
                         throw new InvalidOperationException(
                             $"PVF {PvfPath} has an invalid card bead result " +
@@ -356,6 +355,23 @@ namespace DfoServer.Game.ExpertJob
                 }
             }
 
+        }
+
+        private static bool BeadContainsCardId(StackableItemFile bead, int cardItemId)
+        {
+            if (bead == null || cardItemId <= 0)
+                return false;
+
+            if (bead.MonsterCardIds != null)
+            {
+                foreach (var beadCardId in bead.MonsterCardIds)
+                {
+                    if (beadCardId == cardItemId)
+                        return true;
+                }
+            }
+
+            return bead.MonsterCardId == cardItemId;
         }
 
         private static IReadOnlyList<InventoryMaterialRequirement> ParseMaterialRequirements(

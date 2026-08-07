@@ -153,10 +153,14 @@ namespace DfoServer.Network.Handlers
             var refreshSlots = new Dictionary<InventoryListType, HashSet<short>>();
             var refreshAccountCargo = false;
             var refreshPersonalCargo = false;
+            var mailboxAlarmNeeded = false;
             foreach (var result in results)
             {
                 foreach (var updateResult in EnumerateResultGroup(result))
                 {
+                    if (updateResult.DeliveredByMail)
+                        mailboxAlarmNeeded = true;
+
                     if (updateResult.ConsumedOnPurchase)
                     {
                         if (updateResult.ListType == InventoryListType.AccountCargo)
@@ -199,6 +203,15 @@ namespace DfoServer.Network.Handlers
             }
 
             await SendQueuedItemListUpdates(session, refreshSlots);
+
+            if (mailboxAlarmNeeded)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketType.MAILBOX_ALARM,
+                    MailboxHandler.BuildMailboxAlarmNotification(1)));
+                FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: mailbox alarm sent for overflow rewards");
+            }
 
             if (_refresh != null && results.Exists(r => r.NameTagEquipped))
             {

@@ -14,6 +14,7 @@ namespace DfoServer
         private static readonly (string Arg, Func<int> Run)[] SelfTestRegistry =
         {
             ("--selftest-monster-card-bind", SelfTests.MonsterCardBindSelfTest.Run),
+            ("--selftest-monster-card-bead-metadata", SelfTests.MonsterCardBeadMetadataSelfTest.Run),
             ("--selftest-monster-card-upgrade", SelfTests.MonsterCardUpgradeSelfTest.Run),
             ("--selftest-auction-service", SelfTests.AuctionServiceNotificationSelfTest.Run),
             ("--selftest-chronicle-growth", SelfTests.ChronicleGrowthSelfTest.Run),

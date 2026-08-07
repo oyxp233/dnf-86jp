@@ -1,5 +1,6 @@
 using DfoServer.Game.Inventory;
 using DfoServer.Infrastructure;
+using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
 
@@ -33,9 +34,40 @@ namespace DfoServer.Game.Mailbox
             string title,
             string text,
             out InventoryOverflowDeliveryResult result)
+            => TryDeliverCore(
+                inventory,
+                rewards,
+                title,
+                text,
+                mails => _mailboxService.SendSystemMails(mails),
+                out result);
+
+        internal bool TryDeliver(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            InventoryService inventory,
+            IReadOnlyList<InventoryRewardGrantRequest> rewards,
+            string title,
+            string text,
+            out InventoryOverflowDeliveryResult result)
+            => TryDeliverCore(
+                inventory,
+                rewards,
+                title,
+                text,
+                mails => _mailboxService.SendSystemMails(connection, transaction, mails),
+                out result);
+
+        private static bool TryDeliverCore(
+            InventoryService inventory,
+            IReadOnlyList<InventoryRewardGrantRequest> rewards,
+            string title,
+            string text,
+            Func<IReadOnlyList<MailboxSendRequest>, MailboxSendResult> sendMails,
+            out InventoryOverflowDeliveryResult result)
         {
             result = new InventoryOverflowDeliveryResult();
-            if (inventory == null || rewards == null)
+            if (inventory == null || rewards == null || sendMails == null)
                 return Fail(result);
             if (rewards.Count == 0)
                 return true;
@@ -47,7 +79,7 @@ namespace DfoServer.Game.Mailbox
                 return true;
 
             var mails = BuildMailRequests(inventory, attachments, title, text);
-            var send = _mailboxService.SendSystemMails(mails);
+            var send = sendMails(mails);
             if (!send.Success)
             {
                 FileLogger.Log($"[InventoryOverflow] mail delivery failed cid={inventory.CharacterId} reason={send.Error}");

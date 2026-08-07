@@ -62,6 +62,9 @@ namespace DfoServer.Game.Mailbox
                 && (options.AvatarDetailTemplate != null || options.ExpireTime > 0))
             {
                 var template = options.AvatarDetailTemplate;
+                var jewelSocket = template != null
+                    ? (template.JewelSocket ?? Array.Empty<byte>())
+                    : ResolveAvatarDefaultJewelSocket(core.ItemId);
                 return JsonSerializer.Serialize(new DetailEnvelope
                 {
                     Kind = "avatar",
@@ -71,7 +74,7 @@ namespace DfoServer.Game.Mailbox
                             ? options.ExpireTime
                             : (template?.ExpireDate ?? 0),
                         ClearAvatarId = template?.ClearAvatarId ?? 0,
-                        JewelSocket = template?.JewelSocket ?? Array.Empty<byte>(),
+                        JewelSocket = jewelSocket,
                         Color1 = template?.Color1 ?? 0,
                         Color2 = template?.Color2 ?? 0,
                         DeleteDate = template?.DeleteDate ?? 0,
@@ -104,6 +107,22 @@ namespace DfoServer.Game.Mailbox
             }
 
             return string.Empty;
+        }
+
+        private static byte[] ResolveAvatarDefaultJewelSocket(int itemTemplateId)
+        {
+            var socketTypes = ItemMetadataResolver.ResolveAvatarDefaultSocketTypes(itemTemplateId);
+            if (socketTypes == null || socketTypes.Count == 0)
+                return Array.Empty<byte>();
+
+            var socket = new JewelSocket();
+            for (var index = 0; index < JewelSocket.SocketCount; index++)
+            {
+                var socketType = index < socketTypes.Count ? socketTypes[index] : (byte)0;
+                socket.Set(index, socketType, socketType != 0 ? -1 : 0);
+            }
+
+            return socket.ToBytes();
         }
 
         internal static InventoryCreateOptions BuildCreateOptions(string detailJson)

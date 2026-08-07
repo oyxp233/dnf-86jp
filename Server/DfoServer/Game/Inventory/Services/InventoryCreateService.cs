@@ -214,6 +214,7 @@ namespace DfoServer.Game.Inventory
                 if (result.AvatarDetail == null)
                     return false;
 
+                ApplyAvatarDefaultSockets(result.AvatarDetail, core.ItemId);
                 ApplyAvatarDetailTemplate(result.AvatarDetail, options?.AvatarDetailTemplate);
                 ApplyCreateReason(result, reason, options);
                 return true;
@@ -248,6 +249,25 @@ namespace DfoServer.Game.Inventory
             target.Color1 = template.Color1;
             target.Color2 = template.Color2;
             target.DeleteDate = template.DeleteDate;
+        }
+
+        private static void ApplyAvatarDefaultSockets(AvatarDetail target, int itemTemplateId)
+        {
+            if (target == null || itemTemplateId <= 0)
+                return;
+
+            var socketTypes = ItemMetadataResolver.ResolveAvatarDefaultSocketTypes(itemTemplateId);
+            if (socketTypes == null || socketTypes.Count == 0)
+                return;
+
+            var socket = target.JewelSocketView;
+            for (var index = 0; index < JewelSocket.SocketCount; index++)
+            {
+                var socketType = index < socketTypes.Count ? socketTypes[index] : (byte)0;
+                socket.Set(index, socketType, socketType != 0 ? -1 : 0);
+            }
+
+            target.JewelSocketView = socket;
         }
 
         private static void ApplyCreatureDetailTemplate(CreatureDetail target, CreatureDetail template)

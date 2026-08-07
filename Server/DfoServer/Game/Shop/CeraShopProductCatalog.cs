@@ -45,6 +45,23 @@ namespace DfoServer.Game.Shop
             return Data.Value.BuyOnlyCeraPoint.Contains(itemTemplateId);
         }
 
+        internal static bool TryFindBuyOnlyCeraProduct(out CeraShopProductEntry entry)
+        {
+            entry = null;
+            foreach (var candidate in Data.Value.Products.Values)
+            {
+                if (candidate.ItemTemplateId <= 0
+                    || !Data.Value.BuyOnlyCera.Contains(candidate.ItemTemplateId))
+                    continue;
+                if (entry != null && candidate.ProductId >= entry.ProductId)
+                    continue;
+
+                entry = candidate;
+            }
+
+            return entry != null;
+        }
+
         private static CatalogData Load()
         {
             var content = ReadCatalogText();

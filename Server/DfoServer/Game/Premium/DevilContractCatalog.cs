@@ -57,6 +57,53 @@ namespace DfoServer.Game.Premium
             return _byCommodityNo.TryGetValue(commodityNo, out purchase);
         }
 
+        internal bool TryFindAllServicePackagePurchase(
+            out int commodityNo,
+            out DevilContractPurchase purchase)
+        {
+            commodityNo = 0;
+            purchase = null;
+
+            foreach (var pair in _byCommodityNo)
+            {
+                var candidate = pair.Value;
+                if (candidate == null || !candidate.IsPackage)
+                    continue;
+                if (!TryResolveServiceGrants(candidate, out var grants)
+                    || grants.Count != SlotCount)
+                    continue;
+                if (purchase != null && pair.Key >= commodityNo)
+                    continue;
+
+                commodityNo = pair.Key;
+                purchase = candidate;
+            }
+
+            return purchase != null;
+        }
+
+        internal List<int> GetServiceItemTemplateIdsBySlot()
+        {
+            var result = new List<int>();
+            for (var slotIndex = 0; slotIndex < SlotCount; slotIndex++)
+            {
+                var itemTemplateId = 0;
+                foreach (var pair in _slotByItemTemplateId)
+                {
+                    if (pair.Value != slotIndex)
+                        continue;
+
+                    itemTemplateId = pair.Key;
+                    break;
+                }
+
+                if (itemTemplateId > 0)
+                    result.Add(itemTemplateId);
+            }
+
+            return result;
+        }
+
         internal bool TryResolveServiceItem(
             int itemTemplateId,
             out int slotIndex,

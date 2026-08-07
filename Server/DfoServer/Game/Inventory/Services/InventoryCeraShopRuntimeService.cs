@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using DfoServer.Game.Currency;
+using DfoServer.Game.Mailbox;
 using DfoServer.Game.Shop;
 using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
@@ -397,15 +398,36 @@ namespace DfoServer.Game.Inventory
             if (requests.Count == 0)
                 return false;
 
-            if (!InventoryRewardGrantService.TryPlanBatch(inventory, requests, out var plan)
-                || plan == null
-                || !plan.Success)
+            var planningInventory = InventorySpecialConsumableService.CreatePlanningInventory(inventory);
+            if (!InventorySpecialConsumableService.TryPlanDirectRewards(
+                    planningInventory,
+                    requests,
+                    out var directPlan,
+                    out var overflowRewards)
+                || directPlan == null)
             {
-                FileLogger.Log($"[CeraShopRuntime] grant plan failed product=0x{product.ProductId:X8} item=0x{product.ItemTemplateId:X8} error={plan?.Error} rewards={FormatGrantRequests(requests, 12)}");
+                FileLogger.Log($"[CeraShopRuntime] grant plan failed product=0x{product.ProductId:X8} item=0x{product.ItemTemplateId:X8} rewards={FormatGrantRequests(requests, 12)}");
                 return false;
             }
 
-            if (!TrySpendPayment(inventory, totalGoldCost, totalCeraCost, ceraMode, out var payment))
+            if (directPlan.Entries.Count == 0 && overflowRewards.Count == 0)
+                return false;
+
+            Func<SqliteConnection, SqliteTransaction, bool> mailAction = null;
+            if (overflowRewards.Count > 0)
+            {
+                mailAction = (connection, transaction) =>
+                    MailboxInventoryOverflowRewardSink.Instance.TryDeliver(
+                        connection,
+                        transaction,
+                        inventory,
+                        overflowRewards,
+                        null,
+                        null,
+                        out _);
+            }
+
+            if (!TrySpendPayment(inventory, totalGoldCost, totalCeraCost, ceraMode, mailAction, out var payment))
             {
                 if (payment.Failure == CeraShopPaymentFailure.InsufficientCera)
                     failure = CeraShopPurchaseFailure.InsufficientCera;
@@ -416,15 +438,45 @@ namespace DfoServer.Game.Inventory
             if (!ApplyInventoryCosts(inventory, totalGoldCost, couponId, costMutations))
                 return false;
 
-            if (!InventoryRewardGrantService.TryApplyPreparedBatch(inventory, plan, out var grant)
-                || grant == null
-                || !grant.Success
-                || grant.Results.Count == 0)
-                return false;
+            InventoryRewardGrantBatchResult grant = null;
+            if (directPlan.Entries.Count > 0)
+            {
+                if (!InventoryRewardGrantService.TryApplyPreparedBatch(inventory, directPlan, out grant)
+                    || grant == null
+                    || !grant.Success
+                    || grant.Results.Count == 0)
+                    return false;
 
-            result = ToMutationResult(inventory, grant.Results[0], payment, effectiveCount, totalGoldCost > 0);
-            for (var index = 1; index < grant.Results.Count; index++)
-                result.ExtraResults.Add(ToMutationResult(inventory, grant.Results[index], payment, effectiveCount, false));
+                result = ToMutationResult(inventory, grant.Results[0], payment, effectiveCount, totalGoldCost > 0);
+                for (var index = 1; index < grant.Results.Count; index++)
+                    result.ExtraResults.Add(ToMutationResult(inventory, grant.Results[index], payment, effectiveCount, false));
+            }
+            else
+            {
+                result = new InventoryMutationResult
+                {
+                    ListType = InventoryListType.Main,
+                    SlotIndex = -1,
+                    ItemTemplateId = product.ItemTemplateId,
+                    UpdatedGold = payment.NewGold,
+                    UpdatedCoin = payment.NewCera,
+                    UpdatedTokenCera = payment.NewTokenCera,
+                    UpdatedHappyTokenCera = payment.NewHappyTokenCera,
+                    GoldSpent = totalGoldCost > 0,
+                    RequestedCount = (short)Math.Min(short.MaxValue, Math.Max(1, effectiveCount)),
+                    AppliedCount = 0,
+                };
+            }
+
+            if (overflowRewards.Count > 0)
+            {
+                result.DeliveredByMail = true;
+                FileLogger.Log(
+                    $"[CeraShopRuntime] grant overflow mailed product=0x{product.ProductId:X8} " +
+                    $"item=0x{product.ItemTemplateId:X8} direct={directPlan.Entries.Count} " +
+                    $"overflow={FormatGrantRequests(overflowRewards, 12)}");
+            }
+
             foreach (var cost in costMutations)
                 result.ExtraResults.Add(cost);
 
@@ -924,6 +976,17 @@ namespace DfoServer.Game.Inventory
             CeraPayMode mode,
             out CeraShopPaymentPlan plan)
         {
+            return TrySpendPayment(inventory, goldCost, ceraCost, mode, null, out plan);
+        }
+
+        private static bool TrySpendPayment(
+            InventoryService inventory,
+            int goldCost,
+            int ceraCost,
+            CeraPayMode mode,
+            Func<SqliteConnection, SqliteTransaction, bool> action,
+            out CeraShopPaymentPlan plan)
+        {
             plan = default;
             return inventory != null
                 && TrySpendPaymentAndApplyDbAction(
@@ -933,7 +996,7 @@ namespace DfoServer.Game.Inventory
                     goldCost,
                     ceraCost,
                     mode,
-                    null,
+                    action,
                     out plan);
         }
 

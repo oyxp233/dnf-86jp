@@ -199,6 +199,9 @@ namespace DfoServer.Game.Dungeon
                 }
 
                 var pickupCount = NormalizePickupCount(drop.StackCount);
+                if (!CanPlanPickupDrop(lease.Inventory, drop, pickupCount))
+                    return PickupResult.InventoryFull;
+
                 var pickedItemId = drop.Core != null ? drop.Core.ItemId : (int)drop.TemplateId;
                 InventoryRewardGrantResult grant;
                 bool inserted;
@@ -232,6 +235,29 @@ namespace DfoServer.Game.Dungeon
                     PickedUpItemId = pickedItemId
                 };
             }
+        }
+
+        private static bool CanPlanPickupDrop(
+            InventoryService inventory,
+            DropInfo drop,
+            int pickupCount)
+        {
+            if (inventory == null || pickupCount <= 0)
+                return false;
+
+            var request = drop.Core != null
+                ? InventoryRewardGrantRequest.Existing(drop.Core.Copy(), pickupCount)
+                : InventoryRewardGrantRequest.Create(
+                    (int)drop.TemplateId,
+                    pickupCount,
+                    ItemCreateReason.DungeonDrop);
+
+            return InventoryRewardGrantService.TryPlanBatch(
+                    inventory,
+                    new[] { request },
+                    out var plan)
+                && plan != null
+                && plan.Success;
         }
 
         internal InventoryDropResult TryDropInventoryItem(

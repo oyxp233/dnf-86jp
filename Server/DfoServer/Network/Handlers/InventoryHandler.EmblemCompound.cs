@@ -41,14 +41,14 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.ChangedSlots);
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0100,
                 EmblemCompoundAckBuilder.BuildSuccess(result)));
+            await _refresh.SendUpdateItemList(session, InventoryListType.Main, result.ChangedSlots);
 
             FileLogger.Log($"[{ProtocolName}] COMPOUND_EMBLEM OK booster=0x{result.PvfBoosterItemTemplateId:X8} " +
                 $"reward=0x{result.RewardItemTemplateId:X8}@{result.RewardSlotIndex} " +
                 $"granted={result.RewardGrantedCount} stack={result.RewardStackCount} " +
-                $"ack=UPDATE_ITEM_LIST+CMD0100({EmblemCompoundAckBuilder.SuccessLength}B result-list) " +
+                $"ack=CMD0100({EmblemCompoundAckBuilder.SuccessLength}B result-list)+UPDATE_ITEM_LIST " +
                 $"slots={string.Join(",", result.ChangedSlots)}");
         }
     }

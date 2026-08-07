@@ -39,6 +39,8 @@ namespace DfoServer.Network
 
         public DateTime PendingDarkKnightAutoComboUtc { get; set; }
 
+        public int PendingReturnSelectCharacterId { get; set; }
+
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
         public EnhancedClientSession(

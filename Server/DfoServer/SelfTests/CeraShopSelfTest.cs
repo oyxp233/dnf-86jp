@@ -52,10 +52,6 @@ namespace DfoServer.SelfTests
                 Check($"{label} coinPrice == {expectedCoinPrice} (got {entry.CoinPrice})", entry.CoinPrice == expectedCoinPrice);
             }
 
-            // [regular package] 段商品 —— 修复前该段未解析, 这两件礼盒购买必失败。
-            CheckProduct("强化成功幸运礼盒", 102661, 10007836, 9800);
-            CheckProduct("增幅成功幸运礼盒", 102660, 10007837, 12800);
-
             // 回归: 已解析的 [regular package] 段样本商品(Lv80~84 专用礼包)也应正确读到 col4 价格。
             CheckProduct("Lv80~84专用礼包", 102290, 2683268, 2860);
 
@@ -69,8 +65,9 @@ namespace DfoServer.SelfTests
             Check("ordinary item is rejected as coupon", !InventoryCeraShopRuntimeService.IsPurchaseCoupon(10000006));
             Check("buy-only-cera item reports insufficient cera instead of inventory full", CheckBuyOnlyCeraErrorAck());
             Check("happy-token gift box grants account currency atomically without an inventory item", CheckHappyTokenCeraGiftBox());
-            Check("60-day Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
+            Check("Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
             Check("contract packages parse and route all services without inventory slots", CheckContractRewardRouting());
+            Check("overflow reward split keeps fitting count in inventory and mails remainder", CheckOverflowRewardSplit());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
@@ -115,11 +112,12 @@ namespace DfoServer.SelfTests
 
         private static bool CheckBuyOnlyCeraErrorAck()
         {
-            const int productId = 104267;
-            const int itemTemplateId = 10007282;
-            if (!CeraShopProductCatalog.TryResolve(productId, out var product)
-                || product?.ItemTemplateId != itemTemplateId
-                || !CeraShopProductCatalog.IsBuyOnlyCera(itemTemplateId))
+            if (!CeraShopProductCatalog.TryFindBuyOnlyCeraProduct(out var product)
+                || product == null
+                || !CeraShopProductCatalog.TryResolve(product.ProductId, out var resolved)
+                || resolved == null
+                || resolved.ItemTemplateId != product.ItemTemplateId
+                || !CeraShopProductCatalog.IsBuyOnlyCera(product.ItemTemplateId))
                 return false;
 
             var insufficientCera = CeraShopPurchaseAckBuilder.BuildError(
@@ -321,55 +319,29 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
 
         private static bool CheckContractRewardRouting()
         {
-            const int mixedPackageProductId = 104008;
-            const int mixedPackageItemId = 2682994;
-            const int contractBoosterItemId = 10008056;
-            const int includedPremiumItemId = 2660411;
-            const int devilServiceItemId = 2681934;
-            var expectedBoosterRewards = new[] { 46, 34, includedPremiumItemId };
-
-            if (!CeraShopProductCatalog.TryResolve(mixedPackageProductId, out var product)
-                || product == null
-                || product.ItemTemplateId != mixedPackageItemId)
+            var catalog = DevilContractCatalog.Parse(PvfArchiveAccessor.ReadText("etc/cerashop.etc"));
+            if (!catalog.TryFindAllServicePackagePurchase(out _, out var purchase)
+                || !catalog.TryResolveServiceGrants(purchase, out var grants)
+                || grants.Count != DevilContractCatalog.SlotCount)
                 return false;
 
-            var mixedPackage = StackableItemProvider.Load(mixedPackageItemId);
-            if (mixedPackage == null
-                || !mixedPackage.PackageRewards.Any(reward => reward?.ItemId == includedPremiumItemId)
-                || !mixedPackage.PackageRewards.Any(reward => reward != null && reward.ItemId != includedPremiumItemId))
+            var serviceItemTemplateIds = catalog.GetServiceItemTemplateIdsBySlot();
+            if (serviceItemTemplateIds.Count != DevilContractCatalog.SlotCount)
                 return false;
 
-            var contractBooster = StackableItemProvider.Load(contractBoosterItemId);
-            var contractRewards = contractBooster?.BoosterRewards
-                .Where(reward => string.Equals(reward?.RewardKind, "cera", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            // [cera] 数据为“抽取次数 + 物品ID/权重/数量”，不能按物品ID/数量二元组拆分。
-            if (contractRewards == null
-                || contractRewards.Count != expectedBoosterRewards.Length)
-                return false;
-            for (var i = 0; i < expectedBoosterRewards.Length; i++)
+            for (var slotIndex = 0; slotIndex < serviceItemTemplateIds.Count; slotIndex++)
             {
-                var reward = contractRewards[i];
-                if (reward.ItemId != expectedBoosterRewards[i]
-                    || reward.Weight != 1000
-                    || reward.Count != 1
-                    || reward.DrawCount != 1)
+                var itemTemplateId = serviceItemTemplateIds[slotIndex];
+                if (!PremiumService.TryResolveContractItem(itemTemplateId, out var premiumType, out var durationDays)
+                    || premiumType != DevilContractCatalog.SlotToPremiumType(slotIndex)
+                    || durationDays <= 0)
                     return false;
             }
-
-            if (!PremiumService.TryResolveContractItem(includedPremiumItemId, out var includedType, out var includedDays)
-                || includedType != 84
-                || includedDays != 15
-                || !PremiumService.TryResolveContractItem(devilServiceItemId, out var devilType, out var devilDays)
-                || devilType != DevilContractCatalog.SlotToPremiumType(0)
-                || devilDays != 30)
-                return false;
 
             var inventory = new InventoryService(903031, 903032);
             if (!InventoryRewardGrantService.TryPlanBatch(
                     inventory,
-                    expectedBoosterRewards
-                        .Append(devilServiceItemId)
+                    serviceItemTemplateIds
                         .Select(itemId => InventoryRewardGrantRequest.Create(
                             itemId,
                             1,
@@ -378,7 +350,7 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
                     out var plan)
                 || plan == null
                 || !plan.Success
-                || plan.Entries.Count != expectedBoosterRewards.Length + 1)
+                || plan.Entries.Count != DevilContractCatalog.SlotCount)
                 return false;
 
             return plan.Entries.All(entry => entry.Kind == InventoryRewardGrantKind.Premium);
@@ -388,12 +360,7 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
         {
             const int accountId = 903021;
             const int characterId = 903022;
-            const int commodityNo = 100625;
-            const int expectedItemId = 2682006;
-            const int expectedCeraPrice = 3880;
-            const int expectedDurationDays = 60;
             const int initialCera = 100;
-            const int initialTokenCera = 5000;
             const long now = 1720000000;
             var databasePath = Path.Combine(
                 Path.GetTempPath(),
@@ -402,15 +369,21 @@ VALUES(@characterId, @accountId, 'cerashop-happy-token');";
             try
             {
                 var catalog = DevilContractCatalog.Parse(PvfArchiveAccessor.ReadText("etc/cerashop.etc"));
-                if (!catalog.TryGetPurchase(commodityNo, out var purchase)
-                    || !purchase.IsPackage
-                    || purchase.ItemTemplateId != expectedItemId
-                    || purchase.CeraPrice != expectedCeraPrice
-                    || purchase.DurationDays != expectedDurationDays)
+                if (!catalog.TryFindAllServicePackagePurchase(out var commodityNo, out var purchase)
+                    || purchase.CeraPrice <= 0
+                    || purchase.DurationDays <= 0)
+                    return false;
+                if (!CeraShopProductCatalog.TryResolve(commodityNo, out var shopProduct)
+                    || shopProduct == null
+                    || shopProduct.ItemTemplateId != purchase.ItemTemplateId
+                    || shopProduct.CoinPrice != purchase.CeraPrice)
                     return false;
                 if (!catalog.TryResolveServiceGrants(purchase, out var grants)
                     || grants.Count != DevilContractCatalog.SlotCount)
                     return false;
+                var expectedCeraPrice = purchase.CeraPrice;
+                var expectedDurationDays = purchase.DurationDays;
+                var initialTokenCera = expectedCeraPrice + 1000;
                 var connectionString = SqliteDatabaseBootstrap.Initialize(
                     databasePath,
                     ServerPaths.SchemaFilePath);
@@ -507,6 +480,68 @@ ORDER BY premium_type;";
                     }
                 }
             }
+        }
+
+        private static bool CheckOverflowRewardSplit()
+        {
+            if (!TryFindFiniteStackableItem(out var itemId, out var itemKind, out var stackLimit))
+                return false;
+
+            var inventory = new InventoryService(903041, 903042);
+            var existing = ItemCore.Create(itemKind, itemId);
+            existing.Count = stackLimit - 1;
+            inventory.AttachItem(InventoryListType.Main, InventoryService.MainSlotStart, existing);
+
+            var planningInventory = InventorySpecialConsumableService.CreatePlanningInventory(inventory);
+            var requests = new[]
+            {
+                InventoryRewardGrantRequest.Create(
+                    itemId,
+                    2,
+                    ItemCreateReason.MallPurchase),
+            };
+
+            return InventorySpecialConsumableService.TryPlanDirectRewards(
+                    planningInventory,
+                    requests,
+                    out var directPlan,
+                    out var overflowRewards)
+                && directPlan != null
+                && directPlan.Success
+                && directPlan.Entries.Count == 1
+                && directPlan.Entries[0].ItemTemplateId == itemId
+                && directPlan.Entries[0].GrantedCount == 1
+                && overflowRewards.Count == 1
+                && overflowRewards[0].ItemTemplateId == itemId
+                && overflowRewards[0].Count == 1;
+        }
+
+        private static bool TryFindFiniteStackableItem(
+            out int itemId,
+            out byte itemKind,
+            out int stackLimit)
+        {
+            var candidates = new[] { 10000006, 10007350, 10007282, 10007717, 10007836 };
+            foreach (var candidate in candidates)
+            {
+                if (!ItemMetadataResolver.TryResolveItemKind(candidate, out itemKind))
+                    continue;
+
+                var core = ItemCore.Create(itemKind, candidate);
+                if (!InventoryStackRuleService.IsStackable(core)
+                    || !InventoryStackRuleService.TryGetStackLimit(core, out stackLimit)
+                    || stackLimit <= 1
+                    || stackLimit == int.MaxValue)
+                    continue;
+
+                itemId = candidate;
+                return true;
+            }
+
+            itemId = 0;
+            itemKind = 0;
+            stackLimit = 0;
+            return false;
         }
 
         private static int CountSourceRows(

@@ -6,6 +6,22 @@ namespace DfoServer.Game.Dungeon
     {
         Standard,
         BloodAltar,
+        Tournament,
+    }
+
+    public static class DungeonClearPresentationPolicy
+    {
+        public static bool UsesStandardResultProjection(
+            DungeonClearPresentationKind kind)
+            => kind == DungeonClearPresentationKind.Standard;
+
+        public static bool UsesCommonExperienceAuthority(
+            DungeonClearPresentationKind kind)
+            => kind != DungeonClearPresentationKind.Tournament;
+
+        public static bool CompletesAtClearCommit(
+            DungeonClearPresentationKind kind)
+            => kind == DungeonClearPresentationKind.Tournament;
     }
 
     public sealed class DungeonEventEnvelope

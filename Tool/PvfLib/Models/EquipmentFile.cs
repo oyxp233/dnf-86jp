@@ -77,6 +77,10 @@ namespace PvfLib
         public int CoolTime { get; set; } = -1;
         public int InventoryLimit { get; set; } = -1;
         public string NeedMaterial { get; set; }
+        /// <summary>
+        /// Additive reinforcement/amplification success weight on a 100000-point scale.
+        /// </summary>
+        public int UpgradeProbabilityIncrease { get; set; }
 
         #endregion
 
@@ -175,6 +179,7 @@ namespace PvfLib
                     case "cool time": equ.CoolTime = ParseInt(data); break;
                     case "inventory limit": equ.InventoryLimit = ParseInt(data); break;
                     case "need material": equ.NeedMaterial = data; break;
+                    case "upgrade prob increase": equ.UpgradeProbabilityIncrease = ParseInt(data); break;
 
                     
                     case "icon": equ.Icon = data; break;

@@ -120,6 +120,7 @@ namespace DfoServer.Game.ItemUpgrade
         public ItemUpgradeCost Cost { get; set; } = new ItemUpgradeCost();
         public int SuccessRateAddWeight { get; set; }
         public int SuccessRateBonusWeight { get; set; }
+        public int EquippedUpgradeProbabilityIncrease { get; set; }
         public int FailureRetainLevel { get; set; } = -1;
         public int ProtectTriggerLevel => FailureRetainLevel >= 0 ? FailureRetainLevel + 1 : -1;
     }

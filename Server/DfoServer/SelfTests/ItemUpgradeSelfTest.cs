@@ -1,3 +1,4 @@
+using DfoServer.Game.Currency;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ItemUpgrade;
 using DfoServer.Network.Builders;
@@ -16,6 +17,7 @@ namespace DfoServer.SelfTests
         private const int InitialMaterialCount = 1000;
         private const int InitialGold = 500_000_000;
         private const int CurrentUpgradeLevel = 12;
+        private const int UpgradeProbabilityTitleItemId = 26699;
         private static int _failures;
         private static UpgradeTableRow _advancedRow;
 
@@ -25,6 +27,7 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== ITEM_UPGRADE selftest ===");
             TestProtocol();
             TestCurrentPvf();
+            TestUpgradeProbabilityTitle();
             TestNpcUpgradeTransactions();
             TestOutworldVigorRejection();
             Console.WriteLine(_failures == 0
@@ -102,6 +105,67 @@ namespace DfoServer.SelfTests
                     out var advancedMaterial)
                 && advancedMaterial.Name == "高级炉岩炭",
                 "current PVF defines structured advanced-reinforcement inputs");
+        }
+
+        private static void TestUpgradeProbabilityTitle()
+        {
+            var parsed = EquipmentFile.Parse(@"
+[equipment type]
+    `[title name]` 1
+[upgrade prob increase]
+    1000000
+");
+            Check(parsed.UpgradeProbabilityIncrease == 1000000,
+                "equipment parser reads upgrade-probability increase");
+
+            Check(ItemMetadataResolver.TryLoadEquipmentFile(
+                    UpgradeProbabilityTitleItemId,
+                    out var title)
+                && title.UpgradeProbabilityIncrease > 0,
+                "current Kelly title defines an upgrade-probability bonus");
+
+            if (title == null || title.UpgradeProbabilityIncrease <= 0)
+                return;
+
+            var titleBonus = title.UpgradeProbabilityIncrease;
+
+            var reinforceInventory = CreateInventory();
+            EquipUpgradeProbabilityTitle(reinforceInventory);
+            reinforceInventory.SetMainVirtualCount(ClearCubeSlot, 3037, InitialMaterialCount);
+            Check(InventoryItemUpgradeService.TryUpgradeItem(
+                    reinforceInventory,
+                    CreateCommand(ItemUpgradeMethod.Reinforce, ClearCubeSlot),
+                    out var reinforce)
+                && reinforce.FinalSuccessWeight
+                    == Math.Min(100000, 18000 + titleBonus),
+                "equipped title increases reinforcement success weight");
+
+            if (!ItemUpgradeTableProvider.TryGetRow(
+                    ItemUpgradeTableKind.Amplify,
+                    CurrentUpgradeLevel + 1,
+                    out var amplifyRow))
+            {
+                Check(false, "amplification title test requires a PVF table row");
+                return;
+            }
+
+            var amplifyInventory = CreateInventory();
+            var amplifiedTarget = amplifyInventory.GetItem(InventoryListType.Main, TargetSlot).Copy();
+            amplifiedTarget.AmplifyType = (byte)AmplifyAttributeType.Strength;
+            amplifiedTarget.AmplifyValue = 1;
+            amplifyInventory.SetItem(InventoryListType.Main, TargetSlot, amplifiedTarget);
+            EquipUpgradeProbabilityTitle(amplifyInventory);
+
+            var amplifyMaterialSlot = AddUpgradeMaterial(amplifyInventory, amplifyRow);
+            var amplifyCommand = CreateCommand(ItemUpgradeMethod.Amplify, amplifyMaterialSlot);
+            amplifyCommand.Mode = ItemUpgradeMode.Amplify;
+            Check(InventoryItemUpgradeService.TryUpgradeItem(
+                    amplifyInventory,
+                    amplifyCommand,
+                    out var amplify)
+                && amplify.FinalSuccessWeight
+                    == Math.Min(100000, amplifyRow.DerivedSuccessWeight + titleBonus),
+                "equipped title increases amplification success weight");
         }
 
         private static void TestNpcUpgradeTransactions()
@@ -287,6 +351,35 @@ namespace DfoServer.SelfTests
                 Count = count,
             });
             inventory.ClearDirtyState();
+        }
+
+        private static void EquipUpgradeProbabilityTitle(InventoryService inventory)
+        {
+            inventory.SetItem(
+                InventoryListType.Equipment,
+                (short)EquipmentType.TitleName,
+                new ItemCore
+                {
+                    ItemKind = ItemCore.KindEquipment,
+                    ItemId = UpgradeProbabilityTitleItemId,
+                    Uid = 2,
+                });
+            inventory.ClearDirtyState();
+        }
+
+        private static short AddUpgradeMaterial(InventoryService inventory, UpgradeTableRow row)
+        {
+            if (CurrencyService.IsCubeFragment(row.MaterialItemId))
+            {
+                var slot = (short)CurrencyService.GetCubeFragmentSlot(row.MaterialItemId);
+                inventory.SetMainVirtualCount(slot, row.MaterialItemId, InitialMaterialCount);
+                inventory.ClearDirtyState();
+                return slot;
+            }
+
+            const short slotIndex = AdvancedMaterialSlot;
+            AddAdvancedMaterial(inventory, row.MaterialItemId, InitialMaterialCount);
+            return slotIndex;
         }
 
         private static ItemUpgradeCommand CreateCommand(

@@ -271,63 +271,105 @@ namespace DfoServer.Network.Handlers.Dungeon
             var towerItemIds = tower != null
                 ? new List<int>(tower.SeenItemIds)
                 : null;
+            var operations = new List<DungeonRunEndCleanupOperation>
+            {
+                new DungeonRunEndCleanupOperation(
+                    "registry-terminate",
+                    () =>
+                    {
+                        instanceRegistry?.Terminate(
+                            player.CharacterId,
+                            runIdentity,
+                            reasonText);
+                        return Task.CompletedTask;
+                    }),
+                new DungeonRunEndCleanupOperation(
+                    "cancel-timers",
+                    () =>
+                    {
+                        CancelAllTimers(run);
+                        return Task.CompletedTask;
+                    }),
+                new DungeonRunEndCleanupOperation(
+                    "persist-experience",
+                    () =>
+                    {
+                        if (!PersistSessionExp(session, run, reasonText))
+                        {
+                            throw new InvalidOperationException(
+                                "Session experience persistence failed.");
+                        }
+                        return Task.CompletedTask;
+                    }),
+                new DungeonRunEndCleanupOperation(
+                    "clear-tower-state",
+                    () =>
+                    {
+                        run.Tower = null;
+                        RecalibrateTowerQuestOverlayWithoutNotification(
+                            session,
+                            towerItemIds);
+                        return Task.CompletedTask;
+                    }),
+            };
+            if (tower != null)
+            {
+                operations.Add(new DungeonRunEndCleanupOperation(
+                    "restore-persistent-inventory-projection",
+                    () => RestorePersistentInventoryProjectionAsync(
+                        session,
+                        runIdentity)));
+            }
+            operations.Add(new DungeonRunEndCleanupOperation(
+                "project-mechanism-cleanup",
+                () => DungeonMechanismCoordinator.ClearRunEffectsAsync(
+                    session,
+                    run,
+                    reasonText)));
+            operations.Add(new DungeonRunEndCleanupOperation(
+                "end-pet-runtime",
+                () => PetCreatureRuntimeService.EndDungeonToTownAsync(
+                    session,
+                    runIdentity,
+                    reasonText)));
             var cleanup = await DungeonRunEndCleanupExecutor.ExecuteAsync(
                 run,
                 reasonText,
-                new[]
-                {
-                    new DungeonRunEndCleanupOperation(
-                        "registry-terminate",
-                        () =>
-                        {
-                            instanceRegistry?.Terminate(
-                                player.CharacterId,
-                                runIdentity,
-                                reasonText);
-                            return Task.CompletedTask;
-                        }),
-                    new DungeonRunEndCleanupOperation(
-                        "cancel-timers",
-                        () =>
-                        {
-                            CancelAllTimers(run);
-                            return Task.CompletedTask;
-                        }),
-                    new DungeonRunEndCleanupOperation(
-                        "persist-experience",
-                        () =>
-                        {
-                            if (!PersistSessionExp(session, run, reasonText))
-                            {
-                                throw new InvalidOperationException(
-                                    "Session experience persistence failed.");
-                            }
-                            return Task.CompletedTask;
-                        }),
-                    new DungeonRunEndCleanupOperation(
-                        "clear-tower-state",
-                        () =>
-                        {
-                            run.Tower = null;
-                            RecalibrateTowerQuestOverlayWithoutNotification(
-                                session,
-                                towerItemIds);
-                            return Task.CompletedTask;
-                        }),
-                    new DungeonRunEndCleanupOperation(
-                        "project-mechanism-cleanup",
-                        () => DungeonMechanismCoordinator.ClearRunEffectsAsync(
-                            session,
-                            run,
-                            reasonText)),
-                    new DungeonRunEndCleanupOperation(
-                        "end-pet-runtime",
-                        () => PetCreatureRuntimeService.EndDungeonToTownAsync(
-                            session,
-                            runIdentity,
-                            reasonText)),
-                });
+                operations);
             LogIncompleteCleanup(player.CharacterId, run, reasonText, cleanup);
+        }
+
+        private static async Task RestorePersistentInventoryProjectionAsync(
+            EnhancedClientSession session,
+            DungeonRunIdentity endedRunIdentity)
+        {
+            var player = session?.Player;
+            if (player == null
+                || player.CharacterId <= 0
+                || !CanProjectTownState(session, endedRunIdentity))
+            {
+                return;
+            }
+
+            if (!Game.Inventory.InventoryContext.TryGetOwnedLease(
+                    session.SessionId,
+                    player.CharacterId,
+                    out var lease))
+            {
+                throw new InvalidOperationException(
+                    "The ending tower run has no session-owned inventory lease.");
+            }
+
+            var projected = await InventoryRefreshSender.TrySendOwnedItemListRefresh(
+                session,
+                lease,
+                Game.Inventory.InventoryListType.Main,
+                () => CanProjectTownState(session, endedRunIdentity));
+            if (!projected && CanProjectTownState(session, endedRunIdentity))
+            {
+                throw new InvalidOperationException(
+                    "The persistent inventory projection lost its owned lease.");
+            }
         }
 
         // 断线/换角色: 同样丢弃本局。

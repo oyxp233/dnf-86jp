@@ -178,6 +178,12 @@ namespace DfoServer.Network.Handlers
         public Task<bool> TryHandleDeathTowerMoveItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => _services.DeathTower.TryHandleMoveItem(session, header, body);
 
+        public Task<bool> TryHandleDeathTowerSortItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => _services.DeathTower.TryHandleSortItem(session, header, body);
+
+        public Task<bool> TryHandleDeathTowerDeleteItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => _services.DeathTower.TryHandleDeleteItem(session, header, body);
+
         public Task HandleDungeonMechanismCommand(
             EnhancedClientSession session,
             GamePacketHeader header,

@@ -100,7 +100,7 @@ namespace DfoServer.Game.Inventory
             return true;
         }
 
-        private static bool TryGetSortRange(
+        internal static bool TryGetSortRange(
             InventoryService inventory,
             InventoryListType listType,
             byte category,
@@ -182,7 +182,7 @@ namespace DfoServer.Game.Inventory
                 && range.Count > 0;
         }
 
-        private static bool IsSortLocked(InventoryListType listType, short slotIndex, ItemCore item)
+        internal static bool IsSortLocked(InventoryListType listType, short slotIndex, ItemCore item)
         {
             return item != null
                 && item.SortLockFlag == 1
@@ -191,15 +191,28 @@ namespace DfoServer.Game.Inventory
 
         private static int CompareSortableItems(SortableItem left, SortableItem right)
         {
-            var result = left.Item.ItemKind.CompareTo(right.Item.ItemKind);
+            return CompareItems(
+                left.Item,
+                left.OriginalSlot,
+                right.Item,
+                right.OriginalSlot);
+        }
+
+        internal static int CompareItems(
+            ItemCore left,
+            short leftOriginalSlot,
+            ItemCore right,
+            short rightOriginalSlot)
+        {
+            var result = left.ItemKind.CompareTo(right.ItemKind);
             if (result != 0)
                 return result;
 
-            result = left.Item.ItemId.CompareTo(right.Item.ItemId);
+            result = left.ItemId.CompareTo(right.ItemId);
             if (result != 0)
                 return result;
 
-            return left.OriginalSlot.CompareTo(right.OriginalSlot);
+            return leftOriginalSlot.CompareTo(rightOriginalSlot);
         }
 
         private static bool ItemsEqual(ItemCore left, ItemCore right)

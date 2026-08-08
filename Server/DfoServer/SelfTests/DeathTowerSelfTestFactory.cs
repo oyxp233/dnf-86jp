@@ -13,14 +13,19 @@ namespace DfoServer.SelfTests
             int maxClearItemCount = 10,
             bool itemDropsEnabled = true,
             DeathTowerRewardProfile rewardProfile =
-                DeathTowerRewardProfile.Standard)
+                DeathTowerRewardProfile.Standard,
+            bool? usesFpCubePiece = null,
+            bool? limitsStackableItems = null)
         {
+            var standardTower = rewardProfile == DeathTowerRewardProfile.Standard;
             return new DeathTowerData.TowerConfig(
                 dungeonId,
                 stageMapIds,
                 basisLevel,
                 maxClearItemCount,
                 itemDropsEnabled,
+                usesFpCubePiece ?? standardTower,
+                limitsStackableItems ?? standardTower,
                 rewardProfile,
                 Array.Empty<DeathTowerData.TowerEntryItem>(),
                 Array.Empty<DeathTowerData.TowerEntryItem>());

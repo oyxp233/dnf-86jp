@@ -138,6 +138,9 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            context.EquippedUpgradeProbabilityIncrease =
+                ResolveEquippedUpgradeProbabilityIncrease(inventory);
+
             if (!ValidateMaterial(inventory, command.MaterialSlotIndex, material, context.Cost, out errorCode))
             {
                 result = ItemUpgradeResult.Error(command, errorCode);
@@ -641,9 +644,30 @@ namespace DfoServer.Game.Inventory
             if (context.Scene == ItemUpgradeScene.Ticket)
                 return baseWeight;
 
-            var weight = baseWeight + context.SuccessRateAddWeight;
-            weight = (int)((long)weight * (WeightScale + context.SuccessRateBonusWeight) / WeightScale);
-            return Clamp(weight, 0, WeightScale);
+            var additiveWeight = (long)baseWeight
+                + context.SuccessRateAddWeight
+                + context.EquippedUpgradeProbabilityIncrease;
+            additiveWeight = Math.Max(0L, Math.Min(WeightScale, additiveWeight));
+
+            var multiplierWeight = Math.Max(0L, WeightScale + (long)context.SuccessRateBonusWeight);
+            var finalWeight = additiveWeight * multiplierWeight / WeightScale;
+            return (int)Math.Max(0L, Math.Min(WeightScale, finalWeight));
+        }
+
+        private static int ResolveEquippedUpgradeProbabilityIncrease(InventoryService inventory)
+        {
+            var title = inventory?.GetItem(
+                InventoryListType.Equipment,
+                (short)EquipmentType.TitleName);
+            if (title == null
+                || title.ItemKind != ItemCore.KindEquipment
+                || !ItemMetadataResolver.TryLoadEquipmentFile(title.ItemId, out var equipment)
+                || EquipmentTypeInfo.ParseOrUnknown(equipment.EquipmentType) != EquipmentType.TitleName)
+            {
+                return 0;
+            }
+
+            return Math.Max(0, equipment.UpgradeProbabilityIncrease);
         }
 
         private static int ResolvePenaltyType(ItemUpgradeContext context, UpgradeTableRow row, ItemUpgradeTableKind tableKind)

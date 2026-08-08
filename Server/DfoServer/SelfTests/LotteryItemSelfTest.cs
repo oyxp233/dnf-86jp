@@ -648,12 +648,18 @@ VALUES (@accountId, @premiumType, @endTime);
             int itemTemplateId,
             int count)
         {
-            var core = InventoryCreateService.CreateCore(
-                ItemCore.KindConsumable,
-                itemTemplateId,
-                ItemCreateReason.Unknown,
-                count);
+            if (!InventoryCreateService.TryCreateCore(
+                    itemTemplateId,
+                    ItemCreateReason.Unknown,
+                    count,
+                    out var core))
+            {
+                throw new InvalidOperationException(
+                    $"Unable to create PVF-backed lottery fixture item {itemTemplateId}.");
+            }
+
             core.Count = count;
+            core.ExpireTime = 0;
             inventory.AttachItem(InventoryListType.Main, slotIndex, core);
         }
 

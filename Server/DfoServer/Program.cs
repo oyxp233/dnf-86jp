@@ -44,6 +44,7 @@ namespace DfoServer
             ("--selftest-special-dungeon", SelfTests.SpecialDungeonSelfTest.Run),
             ("--selftest-special-dungeon-part2", SelfTests.SpecialDungeonPart2SelfTest.Run),
             ("--selftest-special-dungeon-part3", SelfTests.SpecialDungeonPart3SelfTest.Run),
+            ("--selftest-tournament-settlement", SelfTests.TournamentSettlementSelfTest.Run),
             ("--selftest-card-reward-flow", SelfTests.CardRewardFlowSelfTest.Run),
             ("--selftest-dungeon-persistent-effects", SelfTests.DungeonPersistentEffectSelfTest.Run),
             ("--selftest-monster-card-drop", SelfTests.MonsterCardDropSelfTest.Run),
@@ -62,6 +63,7 @@ namespace DfoServer
             ("--selftest-death-tower-map-loader", SelfTests.DeathTowerMapLoaderSelfTest.Run),
             ("--selftest-death-tower-drop", SelfTests.DeathTowerDropSelfTest.Run),
             ("--selftest-death-tower-protocol", SelfTests.DeathTowerProtocolSelfTest.Run),
+            ("--selftest-death-tower-inventory-overlay", SelfTests.DeathTowerInventoryOverlaySelfTest.Run),
             ("--selftest-death-tower-quest-routing", SelfTests.DeathTowerQuestRoutingSelfTest.Run),
             ("--selftest-quest-clear", SelfTests.QuestClearSelfTest.Run),
             ("--selftest-quest-trigger-counts", SelfTests.QuestTriggerCountSelfTest.Run),
@@ -329,6 +331,7 @@ namespace DfoServer
                 FileLogger.Log(
                     $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Dungeon.ClearRewardGenerator.WarmUp();
+                Game.Dungeon.PassiveObjectDropPlanningService.WarmUp();
                 Game.Inventory.EquipmentRegenerationCandidateCatalog.Warmup();
                 GameWorld.IndependentDropDefinitionCatalog.WarmUp();
                 Game.Inventory.ChronicleRefineMaterialResolver.Warmup();

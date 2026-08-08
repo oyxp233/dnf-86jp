@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Quests;
 using DfoServer.GameWorld;
 using DfoServer.Network.Handlers.Dungeon;
 using PvfLib;
@@ -242,6 +243,7 @@ namespace DfoServer.SelfTests
             TestEventMonsterCandidateRooms(ref failures);
             TestDriftCaveMazeSelection(ref failures);
             TestExplicitMazeStartSpecification(ref failures);
+            TestGentOuterAndVilmarkTaskMazeSelection(ref failures);
             TestTimeGateStartMapOwnership(ref failures);
             TestTimeGateQuestMazeSelection(ref failures);
             TestPersonalSkillQuestMazeSelection(ref failures);
@@ -1472,6 +1474,204 @@ namespace DfoServer.SelfTests
             {
                 Console.WriteLine(
                     $"[FAIL] time-gate start map ownership: {ex.Message}");
+                failures++;
+            }
+        }
+
+        private static void TestGentOuterAndVilmarkTaskMazeSelection(
+            ref int failures)
+        {
+            try
+            {
+                var gentDungeon = DungeonData.GetDungeonFile(80);
+                var gentOrdinary = DungeonData.SelectDungeonMaze(80);
+                var gentWithQuest = DungeonData.SelectDungeonMaze(
+                    dungeonId: 80,
+                    activeQuestIds: new HashSet<int> { 2121 });
+                var gentOrdinaryStart =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 80,
+                        x: 2,
+                        y: 2,
+                        mazeIndex: gentOrdinary.Index,
+                        bossPos: gentOrdinary.Maze.BossMap);
+                var gentQuestStart =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 80,
+                        x: 2,
+                        y: 2,
+                        mazeIndex: gentWithQuest.Index,
+                        bossPos: gentWithQuest.Maze.BossMap);
+                var gentBoss =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 80,
+                        x: 0,
+                        y: 2,
+                        mazeIndex: gentWithQuest.Index,
+                        bossPos: gentWithQuest.Maze.BossMap);
+                Check(
+                    "Gent Outskirts quest cannot replace its only ordinary maze",
+                    gentDungeon.Mazes.Count == 1
+                    && gentDungeon.Mazes[0].QuestConnection == null
+                    && gentOrdinary.Index == 0
+                    && gentWithQuest.Index == 0
+                    && gentOrdinaryStart.Index == 22400
+                    && gentQuestStart.Index == 22400
+                    && gentBoss.Index == 22410,
+                    ref failures);
+
+                var hasGentAdmission = WorldMap.TryGetAdmissionDefinition(
+                    80,
+                    out var gentAdmission);
+                var gentAdmissionDecision = WorldMap.EvaluateDungeonAdmission(
+                    80,
+                    new HashSet<int>(),
+                    new HashSet<int>());
+                Check(
+                    "Gent Outskirts remains an unrestricted persistent dungeon",
+                    hasGentAdmission
+                    && gentAdmission.Mode == DungeonAdmissionMode.Unrestricted
+                    && gentAdmission.HasUnrestrictedEntry
+                    && gentAdmission.PersistentQuestIds.Count == 0
+                    && gentAdmission.ActiveQuestIds.Count == 0
+                    && gentAdmissionDecision.Allowed
+                    && !WorldMap.IsTaskExclusiveDungeon(80)
+                    && WorldMap.ShouldPersistDungeonPermission(80),
+                    ref failures);
+
+                var hasVilmarkAdmission = WorldMap.TryGetAdmissionDefinition(
+                    240,
+                    out var vilmarkAdmission);
+                var expectedAdmissionQuests = new HashSet<int>
+                {
+                    2091,
+                    2092,
+                    2097,
+                    2098,
+                };
+                Check(
+                    "Vilmark task dungeon uses the WDM active-only admission set",
+                    hasVilmarkAdmission
+                    && vilmarkAdmission.Mode
+                        == DungeonAdmissionMode.ActiveQuestOnly
+                    && !vilmarkAdmission.HasUnrestrictedEntry
+                    && vilmarkAdmission.PersistentQuestIds.Count == 0
+                    && new HashSet<int>(vilmarkAdmission.ActiveQuestIds)
+                        .SetEquals(expectedAdmissionQuests)
+                    && WorldMap.IsTaskExclusiveDungeon(240)
+                    && !WorldMap.ShouldPersistDungeonPermission(240),
+                    ref failures);
+
+                var noQuestAdmission = WorldMap.EvaluateDungeonAdmission(
+                    240,
+                    new HashSet<int>(),
+                    new HashSet<int> { 2091 });
+                var allActiveAdmissionsPass = true;
+                var allActiveQuestsProject = true;
+                foreach (var questId in expectedAdmissionQuests)
+                {
+                    var decision = WorldMap.EvaluateDungeonAdmission(
+                        240,
+                        new HashSet<int> { questId },
+                        new HashSet<int>());
+                    allActiveAdmissionsPass &= decision.Allowed;
+
+                    var projected = QuestDungeonPresentationPlanner
+                        .ProjectActiveQuestIds(
+                            new[]
+                            {
+                                new ActiveQuest
+                                {
+                                    Slot = 0,
+                                    QuestId = (ushort)questId,
+                                },
+                            },
+                            new Dictionary<int, int>());
+                    allActiveQuestsProject &= projected.Contains(
+                        (ushort)questId);
+                }
+                Check(
+                    "Vilmark task dungeon rejects cleared-only state and accepts every configured active quest",
+                    !noQuestAdmission.Allowed
+                    && allActiveAdmissionsPass
+                    && allActiveQuestsProject,
+                    ref failures);
+
+                var ordinaryVilmark = DungeonData.SelectDungeonMaze(240);
+                var questVilmark = DungeonData.SelectDungeonMaze(
+                    dungeonId: 240,
+                    activeQuestIds: new HashSet<int> { 2091 });
+                var clearedVilmark = DungeonData.SelectDungeonMaze(
+                    dungeonId: 240,
+                    clearedQuestIds: new HashSet<int> { 2091 });
+                var laterQuestsKeepOrdinaryMaze = true;
+                foreach (var questId in new[] { 2092, 2097, 2098 })
+                {
+                    laterQuestsKeepOrdinaryMaze &=
+                        DungeonData.SelectDungeonMaze(
+                            dungeonId: 240,
+                            activeQuestIds: new HashSet<int> { questId })
+                            .Index == 0;
+                }
+
+                var ordinaryVilmarkStart =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 240,
+                        x: 0,
+                        y: 0,
+                        mazeIndex: ordinaryVilmark.Index,
+                        bossPos: ordinaryVilmark.Maze.BossMap);
+                var questVilmarkStart =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 240,
+                        x: 0,
+                        y: 0,
+                        mazeIndex: questVilmark.Index,
+                        bossPos: questVilmark.Maze.BossMap);
+                var questVilmarkBoss =
+                    DungeonData.GetDungeonMapMonsterSummaryInformation(
+                        dungeonId: 240,
+                        x: 5,
+                        y: 0,
+                        mazeIndex: questVilmark.Index,
+                        bossPos: questVilmark.Maze.BossMap);
+                Check(
+                    "Vilmark quest 2091 alone selects the APC start maze",
+                    ordinaryVilmark.Index == 0
+                    && clearedVilmark.Index == 0
+                    && laterQuestsKeepOrdinaryMaze
+                    && ordinaryVilmarkStart.Index == 37047
+                    && !ContainsMonster(ordinaryVilmarkStart, 1528)
+                    && questVilmark.Index == 1
+                    && questVilmark.Maze.QuestConnection != null
+                    && questVilmark.Maze.QuestConnection.Length >= 2
+                    && questVilmark.Maze.QuestConnection[1] == 2091
+                    && questVilmarkStart.Index == 909
+                    && ContainsMonster(questVilmarkStart, 1528)
+                    && questVilmarkBoss.Index == 37052,
+                    ref failures);
+
+                Check(
+                    "Vilmark clear-map target keeps MAP 37052 and companion APC 1528 distinct",
+                    QuestTargetIndex.TryGetClearMapDefinition(
+                        2091,
+                        out var clearMapDefinition)
+                    && clearMapDefinition.TargetId == 37052
+                    && clearMapDefinition.CompanionApcId == 1528
+                    && QuestData.MatchesClearMapTarget(
+                        2091,
+                        dungeonId: 240,
+                        mapId: 37052)
+                    && !QuestData.MatchesClearMapTarget(
+                        2091,
+                        dungeonId: 240,
+                        mapId: 909),
+                    ref failures);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    $"[FAIL] Gent/Vilmark task maze selection: {ex.Message}");
                 failures++;
             }
         }

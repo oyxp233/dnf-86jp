@@ -310,7 +310,8 @@ namespace DfoServer.Game.Dungeon.Tournament
             intent = new DungeonClearIntent(
                 source,
                 "tournament reward selection complete",
-                finalActor.Code);
+                finalActor.Code,
+                DungeonClearPresentationKind.Tournament);
             return true;
         }
 

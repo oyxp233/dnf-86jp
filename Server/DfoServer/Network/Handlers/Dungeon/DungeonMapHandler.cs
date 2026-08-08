@@ -299,6 +299,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             var sentActorCount = 0;
             var sentTrackedCount = 0;
             var startMapRevisit = false;
+            DungeonInstanceRoom pendingStandardRoom = null;
+            DungeonData.MazeSumInfo pendingStandardMaze = default;
+            ushort pendingFirstActorSequence = 0;
+            byte pendingLayeredFlag = 0;
+            byte pendingHellPartyMode = 0;
+            byte pendingHellPartyFogFlag = 0;
+            IReadOnlyList<RidableObjectSpawnEntry> pendingRidableEntries = null;
 
             // 锁内绝不 await: 把 START_MAP 对 run 房间态(RoomKey/RoomStates/RoomKilledSeqIds/RoomMonsters/
             // MonsterCount)的整段读改写与队友击杀 relay(PropagateKillForClearAsync 在别的线程读这些结构)互斥,
@@ -486,21 +493,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                     hellPartyMonsterInfoAfterStartMap = BuildHellPartyMonsterInfoEntries(hellRoomInfo);
                 }
 
-                // df_game_r：掉落物序号使用独立随机计数，和怪物序号分离。
-                var itemSeqCounter = (ushort)ServerRandom.Next(60000);
-                var extraEntries = isBloodAltarMap
-                    ? null
-                    : GeneratePassiveObjectDrops(
-                        run.DungeonId,
-                        run.MazeIndex,
-                        ref itemSeqCounter);
-
-                if (extraEntries != null)
-                {
-                    foreach (var e in extraEntries)
-                        run.Drops[e.GlobalSeq] = e.ToDropInfo();
-                }
-
                 var ridableForRoom = isBloodAltarMap
                     ? null
                     : GetRidableEntriesForRoom(
@@ -510,17 +502,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                 var hellPartyMapMode = run.HellMode ? run.HellPartyMode : (byte)0;
                 var startMapFogFlag = run.HellMode ? (byte)1 : (byte)0;
 
-                startMapBody = isBloodAltarMap
-                    ? Array.Empty<byte>()
-                    : DungeonNotificationBuilder.BuildStartMap(
-                        startMapMaze,
-                        run.RoomStartSequence,
-                        (int)seed,
-                        layeredRoomFlag: layeredFlag,
-                        hellPartyMode: hellPartyMapMode,
-                        hellPartyFogFlag: startMapFogFlag,
-                        extraEntries: extraEntries,
-                        ridableEntries: ridableForRoom);
+                startMapBody = Array.Empty<byte>();
+                if (!isBloodAltarMap)
+                {
+                    pendingStandardRoom = instanceRoom;
+                    pendingStandardMaze = startMapMaze;
+                    pendingFirstActorSequence = run.RoomStartSequence;
+                    pendingLayeredFlag = layeredFlag;
+                    pendingHellPartyMode = hellPartyMapMode;
+                    pendingHellPartyFogFlag = startMapFogFlag;
+                    pendingRidableEntries = ridableForRoom;
+                }
                 sentMapId = startMapMaze.Index;
                 sentMapX = startMapMaze.X;
                 sentMapY = startMapMaze.Y;
@@ -529,6 +521,25 @@ namespace DfoServer.Network.Handlers.Dungeon
                 run.MonsterCount += (ushort)startMapMaze.Monsters.Count;
             }
             } // end lock(run.SyncRoot)
+
+            if (pendingStandardRoom != null)
+            {
+                var passiveObjectDrops = ProjectPassiveObjectDrops(
+                    run,
+                    pendingStandardRoom);
+                if (passiveObjectDrops.StaleRoom)
+                    return null;
+
+                startMapBody = DungeonNotificationBuilder.BuildStartMap(
+                    pendingStandardMaze,
+                    pendingFirstActorSequence,
+                    unchecked((int)pendingStandardRoom.Seed),
+                    layeredRoomFlag: pendingLayeredFlag,
+                    hellPartyMode: pendingHellPartyMode,
+                    hellPartyFogFlag: pendingHellPartyFogFlag,
+                    extraEntries: passiveObjectDrops.Entries,
+                    ridableEntries: pendingRidableEntries);
+            }
 
             CacheResolvedStartMapId(run, sentMapX, sentMapY, sentMapId);
 
@@ -945,42 +956,76 @@ namespace DfoServer.Network.Handlers.Dungeon
             return result.Count > 0 ? result : null;
         }
 
-        private static List<PassiveObjectDropEntry> GeneratePassiveObjectDrops(
-            int dungeonId, int mazeIndex, ref ushort itemSeqCounter)
+        private static PassiveObjectDropProjectionResult ProjectPassiveObjectDrops(
+            DungeonRun run,
+            DungeonInstanceRoom room)
         {
+            if (run == null
+                || room == null
+                || !run.RewardPolicy.AllowsMonsterDrops)
+            {
+                return PassiveObjectDropProjectionResult.Empty;
+            }
+
             try
             {
-                var dgn = DungeonData.GetDungeonFile(dungeonId);
-                if (dgn.SpecialPassiveObjectItems.Count == 0) return null;
-
-                var result = new List<PassiveObjectDropEntry>();
-
-                foreach (var item in dgn.SpecialPassiveObjectItems)
+                var dgn = DungeonData.GetDungeonFile(run.DungeonId);
+                if (dgn == null
+                    || !dgn.SpecialPassiveObjectItemDefinitionPresent
+                    || dgn.SpecialPassiveObjectItemDefinitionMalformed
+                    || dgn.SpecialPassiveObjectItemGroups.Count == 0
+                    || room.Maze.SpecialPassiveObjects == null
+                    || room.Maze.SpecialPassiveObjects.Count == 0)
                 {
-                    int roll = ServerRandom.Next(10000);
-                    if (roll >= item.DropRate) continue;
-
-                    itemSeqCounter++;
-                    var drop = DropInfo.CreateItem(itemSeqCounter, item.ItemId, 1);
-                    result.Add(new PassiveObjectDropEntry
+                    if (dgn?.SpecialPassiveObjectItemDefinitionMalformed == true)
                     {
-                        ObjectIndex = (byte)item.Index,
-                        GlobalSeq = itemSeqCounter,
-                        ItemId = drop.TemplateId,
-                        StackCount = drop.StackCount,
-                        Endurance = drop.Endurance,
-                        Core = drop.Core != null ? drop.Core.Copy() : null,
-                    });
+                        FileLogger.Log(
+                            $"[DungeonHandler] PASSIVE_OBJ_DROP disabled malformed " +
+                            $"dungeon={run.DungeonId} room={room.RoomInstanceId}");
+                    }
+                    return PassiveObjectDropProjectionResult.Empty;
                 }
 
-                if (result.Count > 0)
-                    FileLogger.Log($"[DungeonHandler] PASSIVE_OBJ_DROP: {result.Count} items generated for dungeon={dungeonId}");
-                return result.Count > 0 ? result : null;
+                var plan = room.GetOrCreatePassiveObjectDropPlan(
+                    () => PassiveObjectDropPlanningService.Default.Plan(
+                        dgn.SpecialPassiveObjectItemGroups,
+                        room.Maze.SpecialPassiveObjects,
+                        DungeonData.GetDungeonBasicLv(run.DungeonId),
+                        run.Difficulty,
+                        new DnfLcg(room.Seed)));
+                var result = PassiveObjectDropProjectionService.ProjectAndRegister(
+                    run,
+                    room,
+                    plan);
+
+                if (plan.Intents.Count > 0
+                    || plan.InvalidActionCount > 0
+                    || plan.UnsupportedRandomCategoryCount > 0
+                    || plan.WasTruncated
+                    || result.InvalidIntentCount > 0
+                    || result.StaleRoom
+                    || result.SceneSlotsExhausted)
+                {
+                    FileLogger.Log(
+                        $"[DungeonHandler] PASSIVE_OBJ_DROP: " +
+                        $"dungeon={run.DungeonId} room={room.RoomInstanceId} " +
+                        $"planned={plan.Intents.Count} projected={result.Entries.Count} " +
+                        $"specific={plan.SpecificDropCount} random={plan.RandomDropCount} " +
+                        $"invalidAction={plan.InvalidActionCount} " +
+                        $"unsupportedRandom={plan.UnsupportedRandomCategoryCount} " +
+                        $"invalidIntent={result.InvalidIntentCount} " +
+                        $"truncated={plan.WasTruncated} stale={result.StaleRoom} " +
+                        $"slotsExhausted={result.SceneSlotsExhausted}");
+                }
+                return result;
             }
             catch (Exception ex)
             {
-                FileLogger.Log($"[DungeonHandler] GeneratePassiveObjectDrops ERROR: {ex.Message}");
-                return null;
+                FileLogger.Log(
+                    $"[DungeonHandler] PASSIVE_OBJ_DROP failed closed: " +
+                    $"dungeon={run.DungeonId} room={room.RoomInstanceId} " +
+                    $"error={ex.Message}");
+                return PassiveObjectDropProjectionResult.Empty;
             }
         }
     }

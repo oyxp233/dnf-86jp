@@ -100,8 +100,10 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             if (session?.Player == null
                 || run == null
-                || run.ClearedFact?.PresentationKind
-                    == DungeonClearPresentationKind.BloodAltar
+                || (run.ClearedFact != null
+                    && !DungeonClearPresentationPolicy
+                        .UsesStandardResultProjection(
+                            run.ClearedFact.PresentationKind))
                 || !run.RewardPolicy.AllowsSettlement
                 || run.RunState != DungeonRunState.Cleared
                 || run.SettlementState != DungeonSettlementState.Preparing)
@@ -344,8 +346,10 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             var run = session?.Player?.CurrentRun;
             if (run == null
-                || run.ClearedFact?.PresentationKind
-                    == DungeonClearPresentationKind.BloodAltar
+                || (run.ClearedFact != null
+                    && !DungeonClearPresentationPolicy
+                        .UsesStandardResultProjection(
+                            run.ClearedFact.PresentationKind))
                 || !run.TryGetPendingSettlementPresentation(
                     out var presentationRankPoint))
             {
@@ -446,7 +450,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return false;
                 }
 
-                if (!await ExecuteSettlementEffectAsync(
+                if (DungeonClearPresentationPolicy
+                        .UsesCommonExperienceAuthority(
+                            clearFact.PresentationKind)
+                    && !await ExecuteSettlementEffectAsync(
                         session,
                         run,
                         identity,
@@ -483,7 +490,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return false;
                 }
 
-                if (!await ExecuteSettlementEffectAsync(
+                if (DungeonClearPresentationPolicy
+                        .UsesCommonExperienceAuthority(
+                            clearFact.PresentationKind)
+                    && !await ExecuteSettlementEffectAsync(
                         session,
                         run,
                         identity,
@@ -581,9 +591,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             var isTowerOfDespair = DungeonData.TryGetTowerOfDespairFloor(
                 run.DungeonId,
                 out var towerOfDespairFloor);
-            var isBloodAltar = run.ClearedFact?.PresentationKind
+            var presentationKind = run.ClearedFact?.PresentationKind
+                ?? DungeonClearPresentationKind.Standard;
+            var isBloodAltar = presentationKind
                 == DungeonClearPresentationKind.BloodAltar;
-            var shouldScheduleCardRewardFlow = !isBloodAltar
+            var standardPresentation = DungeonClearPresentationPolicy
+                .UsesStandardResultProjection(presentationKind);
+            var shouldScheduleCardRewardFlow = standardPresentation
                 && ShouldScheduleCardRewardFlow(run.DungeonId);
             var dungeonLevel = DungeonData.GetDungeonBasicLv(run.DungeonId);
             if (dungeonLevel <= 0)
@@ -591,11 +605,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"Dungeon {run.DungeonId} has no valid basic level.");
 
             var clearRank = CalculateAuthoritativeClearRank();
-            var clearExp = CalculateClearRewardExp(
-                session,
-                run,
-                clearRank.RankBonusIndex,
-                dungeonLevel);
+            var clearExp = DungeonClearPresentationPolicy
+                    .UsesCommonExperienceAuthority(presentationKind)
+                ? CalculateClearRewardExp(
+                    session,
+                    run,
+                    clearRank.RankBonusIndex,
+                    dungeonLevel)
+                : default;
 
             var lcg = run.RoomLcg ?? new DnfLcg(run.Seed);
             var instance = run.Instance;
@@ -640,7 +657,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             };
             var paidItem = default(ClearRewardGenerator.CardReward);
             var paidCardCost = 0;
-            if (ShouldGeneratePaidCardRewards(run.DungeonId))
+            if (shouldScheduleCardRewardFlow
+                && ShouldGeneratePaidCardRewards(run.DungeonId))
             {
                 paidCardCost = ClearRewardGenerator.GetPaidCardCost(dungeonLevel);
                 paidItem = ClearRewardGenerator.GeneratePaidItemCard(
@@ -1200,8 +1218,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal async Task HandleSelectCard(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            if (session?.Player?.CurrentRun?.ClearedFact?.PresentationKind
-                    == DungeonClearPresentationKind.BloodAltar)
+            var clearFact = session?.Player?.CurrentRun?.ClearedFact;
+            if (clearFact != null
+                && !DungeonClearPresentationPolicy
+                    .UsesStandardResultProjection(clearFact.PresentationKind))
             {
                 return;
             }
@@ -1251,8 +1271,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal async Task HandleCardStartRequest(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            if (session?.Player?.CurrentRun?.ClearedFact?.PresentationKind
-                    == DungeonClearPresentationKind.BloodAltar)
+            var clearFact = session?.Player?.CurrentRun?.ClearedFact;
+            if (clearFact != null
+                && !DungeonClearPresentationPolicy
+                    .UsesStandardResultProjection(clearFact.PresentationKind))
             {
                 return;
             }
@@ -1582,6 +1604,20 @@ namespace DfoServer.Network.Handlers.Dungeon
                     && _bloodAltarClearedProjection != null)
                 {
                     await _bloodAltarClearedProjection(session, run);
+                }
+                else if (DungeonClearPresentationPolicy.CompletesAtClearCommit(
+                    clearFact.PresentationKind))
+                {
+                    if ((!run.TryMarkResultShown()
+                            && run.SettlementState
+                                != DungeonSettlementState.ResultShown)
+                        || (!run.TryCompleteSettlement()
+                            && run.SettlementState
+                                != DungeonSettlementState.Completed))
+                    {
+                        throw new InvalidOperationException(
+                            "Dedicated settlement could not reach Completed.");
+                    }
                 }
                 else
                 {

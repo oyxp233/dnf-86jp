@@ -181,6 +181,7 @@ namespace DfoServer.Game.Dungeon
         private readonly Dictionary<int, DungeonActorDeathFact>
             _mapOwnedActorDeaths =
                 new Dictionary<int, DungeonActorDeathFact>();
+        private Lazy<PassiveObjectDropPlan> _passiveObjectDropPlan;
         private DungeonRoomState _state = DungeonRoomState.Created;
         private long _partyDungeonInstanceId;
         private DungeonEventEnvelope _clearSource;
@@ -259,6 +260,27 @@ namespace DfoServer.Game.Dungeon
                         "A dungeon room cannot be attached to multiple instances.");
                 }
             }
+        }
+
+        internal PassiveObjectDropPlan GetOrCreatePassiveObjectDropPlan(
+            Func<PassiveObjectDropPlan> factory)
+        {
+            if (factory == null)
+                throw new ArgumentNullException(nameof(factory));
+
+            Lazy<PassiveObjectDropPlan> lazy;
+            lock (_syncRoot)
+            {
+                if (_passiveObjectDropPlan == null)
+                {
+                    _passiveObjectDropPlan = new Lazy<PassiveObjectDropPlan>(
+                        () => factory() ?? PassiveObjectDropPlan.Empty,
+                        isThreadSafe: true);
+                }
+                lazy = _passiveObjectDropPlan;
+            }
+
+            return lazy.Value;
         }
 
         internal DungeonRoomActorDeathApplication TryRecordActorDeath(

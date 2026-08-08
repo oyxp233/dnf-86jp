@@ -52,6 +52,18 @@ namespace DfoServer.SelfTests
             CheckDanglingPrerequisitePolicy(ref failures);
             CheckTimeGateSameSlotProjection(ref failures);
             CheckJobAndExpertJobSuccessors(ref failures);
+            CheckLevelAndPrerequisiteAvailability(
+                questId: 2121,
+                prerequisiteQuestId: 2120,
+                minimumLevel: 55,
+                label: "Gent Outskirts",
+                ref failures);
+            CheckLevelAndPrerequisiteAvailability(
+                questId: 2089,
+                prerequisiteQuestId: 12683,
+                minimumLevel: 53,
+                label: "Vilmark",
+                ref failures);
 
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
@@ -335,6 +347,54 @@ namespace DfoServer.SelfTests
                 !disjointSuccessors.Contains(11007)
                 && !disjointSuccessors.Contains(11013)
                 && !disjointSuccessors.Contains(11016),
+                ref failures);
+        }
+
+        private static void CheckLevelAndPrerequisiteAvailability(
+            ushort questId,
+            ushort prerequisiteQuestId,
+            int minimumLevel,
+            string label,
+            ref int failures)
+        {
+            var prerequisite = QuestPrerequisiteCatalog.Get(
+                questId);
+            Check($"{label} quest keeps its PVF prerequisite",
+                prerequisite != null
+                && prerequisite.IsValid
+                && prerequisite.CompletedQuestGroups.Count == 1
+                && prerequisite.CompletedQuestGroups[0].Length == 1
+                && prerequisite.CompletedQuestGroups[0][0]
+                    == prerequisiteQuestId,
+                ref failures);
+
+            Check($"{label} quest remains hidden below its minimum level",
+                !BuildQuestIds(
+                    level: minimumLevel - 1,
+                    job: 0,
+                    growType: 0,
+                    prerequisiteQuestId).Contains(questId),
+                ref failures);
+            Check($"{label} quest remains hidden before its prerequisite",
+                !BuildQuestIds(
+                    level: minimumLevel,
+                    job: 0,
+                    growType: 0).Contains(questId),
+                ref failures);
+            Check($"{label} quest appears after level and prerequisite match",
+                BuildQuestIds(
+                    level: minimumLevel,
+                    job: 0,
+                    growType: 0,
+                    prerequisiteQuestId).Contains(questId),
+                ref failures);
+            Check($"completed {label} quest is not offered again",
+                !BuildQuestIds(
+                    level: minimumLevel,
+                    job: 0,
+                    growType: 0,
+                    prerequisiteQuestId,
+                    questId).Contains(questId),
                 ref failures);
         }
 

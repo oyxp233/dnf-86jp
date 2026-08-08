@@ -25,6 +25,8 @@ namespace DfoServer.Network.Handlers.Dungeon
         private readonly GameDungeon.DungeonInstanceRegistry _instanceRegistry;
         private readonly DungeonTownReturnCoordinator _townReturn;
         private readonly ISessionDirectory _sessionDirectory;
+        private readonly DeathTowerTransientInventoryService _transientInventory =
+            new DeathTowerTransientInventoryService();
 
         private static readonly TimeSpan RankingToRewardDelay =
             TimeSpan.FromSeconds(1);
@@ -77,25 +79,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         public async Task SendEntryPacketsAsync(EnhancedClientSession session, DeathTowerSession tower, byte difficulty = 0)
         {
-            if (InventoryContext.TryGetLease(session.Player.CharacterId, out var lease)
-                && lease.IsOwnedBy(session.SessionId))
-            {
-                try
-                {
-                    lock (lease.SyncRoot)
-                    {
-                        tower.SetPersistentMainSlotOccupancy(
-                            lease.Inventory.GetItems(InventoryListType.Main)
-                                .Select(item => item.Key)
-                                .ToList());
-                    }
-                }
-                catch (Exception ex)
-                {
-                    FileLogger.Log($"[DeathTower] online inventory occupancy load failed; continuing without persistent-slot reservations: {ex.Message}");
-                }
-            }
-
             var dungeonId = tower.Config.DungeonId;
             var hasRun = session.Player.CurrentRun != null;
             FileLogger.Log($"[DeathTower] ENTER: cid={session.Player.CharacterId} dungeon={dungeonId} difficulty={difficulty} hasRun={hasRun} stages={tower.Config.TotalStages} basisLv={tower.Config.BasisLevel}");
@@ -1662,11 +1645,30 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         public async Task<bool> TryHandleGetItem(EnhancedClientSession session, ushort sceneSlot)
         {
-            var tower = session?.Player?.DeathTowerState;
-            if (tower == null)
+            if (!TryCaptureTowerCommandContext(
+                    session,
+                    out var runIdentity,
+                    out var tower))
                 return false;
 
-            if (!tower.TryPickupGroundItem(sceneSlot, out var pickup))
+            if (!TryGetOwnedInventoryLease(session, out var lease)
+                || !IsCurrentTowerCommandContext(
+                    session,
+                    runIdentity,
+                    tower,
+                    lease))
+            {
+                FileLogger.Log(
+                    $"[DeathTower] GET_ITEM rejected: missing inventory lease " +
+                    $"cid={session?.Player?.CharacterId ?? 0}");
+                return true;
+            }
+
+            if (!_transientInventory.TryPickup(
+                    tower,
+                    lease,
+                    sceneSlot,
+                    out var pickup))
             {
                 FileLogger.Log($"[DeathTower] GET_ITEM rejected: cid={session.Player.CharacterId} sceneSlot={sceneSlot} ground={tower.GroundItems.Count} inventory={tower.InventoryItems.Count}");
                 return true;
@@ -1680,7 +1682,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session.Player.UserId,
                     (ushort)pickup.DestinationSlot,
                     7)));
-            await SendInventoryUpdates(session, tower, pickup.ChangedSlots);
+            await SendInventorySnapshotAsync(session, tower, lease);
             RecalibrateTowerQuestProgress(session, tower, pickup.ItemId);
             FileLogger.Log($"[DeathTower] GET_ITEM: cid={session.Player.CharacterId} sceneSlot={sceneSlot} item={pickup.ItemId} towerSlot={pickup.DestinationSlot}");
             return true;
@@ -1691,31 +1693,62 @@ namespace DfoServer.Network.Handlers.Dungeon
             GamePacketHeader header,
             byte[] body)
         {
-            var tower = session?.Player?.DeathTowerState;
-            if (tower == null)
+            if (!TryCaptureTowerCommandContext(
+                    session,
+                    out var runIdentity,
+                    out var tower))
                 return false;
-            if (body == null || body.Length < 7)
+            if (!DeathTowerInventoryCommandParser.TryParseUseStackable(
+                    body,
+                    out var command))
                 return true;
 
-            var slot = BitConverter.ToInt16(body, 0);
-            var listType = (InventoryListType)body[2];
-            var instanceValue = BitConverter.ToInt32(body, 3);
-            if (listType != InventoryListType.Main
-                && (listType != InventoryListType.QuickSlot
-                    || !ItemSlotBoundService.IsMainQuickSlot(slot)))
+            if (!TryGetOwnedInventoryLease(session, out var lease)
+                || !IsCurrentTowerCommandContext(
+                    session,
+                    runIdentity,
+                    tower,
+                    lease))
+                return true;
+
+            var expectedItemId = command.ExpectedItemId;
+            if (expectedItemId <= 0)
+            {
+                lock (lease.SyncRoot)
+                {
+                    if (tower.TryGetInventoryItem(
+                            new DeathTowerInventoryEndpoint(
+                                command.ListType,
+                                command.SlotIndex),
+                            out var authoritativeItem))
+                    {
+                        expectedItemId = authoritativeItem.ItemId;
+                    }
+                }
+            }
+
+            var success = _transientInventory.TryUseStackable(
+                tower,
+                lease,
+                command.ListType,
+                command.SlotIndex,
+                expectedItemId,
+                out var handled,
+                out var mutation);
+            if (!handled)
                 return false;
 
-            var expectedItemId = body.Length >= 11 ? BitConverter.ToInt32(body, 7) : 0;
-            if (expectedItemId <= 0 && tower.TryGetInventoryItem(slot, out var authoritativeItem))
-                expectedItemId = authoritativeItem.ItemId;
-            if (expectedItemId <= 0
-                || !tower.TryUseItem(slot, expectedItemId, out var mutation))
+            if (!success)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
                     0x002C,
-                    UseStackableAckBuilder.BuildError((byte)listType, instanceValue, expectedItemId)));
-                FileLogger.Log($"[DeathTower] USE_STACKABLE rejected: cid={session.Player.CharacterId} list={listType} slot={slot} item={expectedItemId}");
+                    UseStackableAckBuilder.BuildError(
+                        (byte)command.ListType,
+                        command.InstanceValue,
+                        expectedItemId)));
+                await SendInventorySnapshotAsync(session, tower, lease);
+                FileLogger.Log($"[DeathTower] USE_STACKABLE rejected: cid={session.Player.CharacterId} list={command.ListType} slot={command.SlotIndex} item={expectedItemId}");
                 return true;
             }
 
@@ -1723,13 +1756,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 0x01,
                 0x002C,
                 UseStackableAckBuilder.BuildSuccess(
-                    slot,
-                    (byte)listType,
-                    instanceValue,
+                    command.SlotIndex,
+                    (byte)command.ListType,
+                    command.InstanceValue,
                     expectedItemId)));
-            await SendInventoryUpdates(session, tower, mutation.ChangedSlots);
+            await SendInventorySnapshotAsync(session, tower, lease);
             RecalibrateTowerQuestProgress(session, tower, mutation.ItemId);
-            FileLogger.Log($"[DeathTower] USE_STACKABLE: cid={session.Player.CharacterId} slot={slot} item={expectedItemId} remaining={mutation.RemainingCount}");
+            FileLogger.Log($"[DeathTower] USE_STACKABLE: cid={session.Player.CharacterId} slot={command.SlotIndex} item={expectedItemId} remaining={mutation.RemainingCount}");
             return true;
         }
 
@@ -1738,131 +1771,255 @@ namespace DfoServer.Network.Handlers.Dungeon
             GamePacketHeader header,
             byte[] body)
         {
-            var tower = session?.Player?.DeathTowerState;
-            if (tower == null)
+            if (!TryCaptureTowerCommandContext(
+                    session,
+                    out var runIdentity,
+                    out var tower))
                 return false;
-            if (body == null || body.Length < 14)
+            if (!DeathTowerInventoryCommandParser.TryParseMove(
+                    body,
+                    out var command))
                 return true;
 
-            var sourceListType = (InventoryListType)body[0];
-            var sourceSlot = BitConverter.ToInt16(body, 1);
-            var moveCount = BitConverter.ToInt32(body, 7);
-            var destinationListType = (InventoryListType)body[11];
-            var destinationSlot = BitConverter.ToInt16(body, 12);
-            var touchesTower = IsTowerEndpoint(sourceListType, sourceSlot, tower)
-                || IsTowerEndpoint(destinationListType, destinationSlot, tower);
-            if (!touchesTower)
+            if (!TryGetOwnedInventoryLease(session, out var lease)
+                || !IsCurrentTowerCommandContext(
+                    session,
+                    runIdentity,
+                    tower,
+                    lease))
+                return true;
+
+            var success = _transientInventory.TryMove(
+                tower,
+                lease,
+                command,
+                session.Player.Job,
+                session.Player.GrowType,
+                out var handled,
+                out var move);
+            if (!handled)
                 return false;
 
-            if (!IsSupportedTowerEndpoint(sourceListType, sourceSlot)
-                || !IsSupportedTowerEndpoint(destinationListType, destinationSlot)
-                || !tower.TryMoveItem(sourceSlot, destinationSlot, moveCount, out var move))
+            if (!success)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x01,
                     0x0013,
                     MoveItemSpaceAckBuilder.BuildError(
-                        0x04,
-                        (byte)sourceListType,
-                        (byte)destinationListType)));
-                FileLogger.Log($"[DeathTower] MOVE_ITEMSPACE rejected: cid={session.Player.CharacterId} src={sourceListType}:{sourceSlot} dst={destinationListType}:{destinationSlot} count={moveCount}");
+                        move.ErrorCode,
+                        (byte)command.SourceListType,
+                        (byte)command.DestinationListType)));
+                await SendInventorySnapshotAsync(session, tower, lease);
+                FileLogger.Log(
+                    $"[DeathTower] MOVE_ITEMSPACE rejected: "
+                    + $"cid={session.Player.CharacterId} "
+                    + $"src={command.SourceListType}:{command.SourceSlotIndex} "
+                    + $"dst={command.DestinationListType}:{command.DestinationSlotIndex} "
+                    + $"count={command.MoveCount} "
+                    + $"identity={move.IdentityResolved}");
                 return true;
             }
 
             var ackResult = new InventoryMoveResult
             {
-                SourceListType = sourceListType,
-                SourceSlotIndex = sourceSlot,
+                SourceListType = command.SourceListType,
+                SourceSlotIndex = command.SourceSlotIndex,
                 MoveValue32 = move.MoveValue32,
-                DestinationListType = destinationListType,
-                DestinationSlotIndex = destinationSlot,
+                DestinationListType = command.DestinationListType,
+                DestinationSlotIndex = command.DestinationSlotIndex,
                 Mutated = move.ChangedSlots.Count > 0,
             };
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x01,
                 0x0013,
-                MoveItemSpaceAckBuilder.Build(ackResult)));
-            if (move.ChangedSlots.Count > 0)
-                await SendInventoryUpdates(session, tower, move.ChangedSlots);
-            FileLogger.Log($"[DeathTower] MOVE_ITEMSPACE: cid={session.Player.CharacterId} src={sourceSlot} dst={destinationSlot} count={moveCount}");
+                DeathTowerInventoryProjectionBuilder.BuildMoveAckBody(ackResult)));
+            await SendInventorySnapshotAsync(session, tower, lease);
             return true;
         }
 
-        private static async Task SendInventoryUpdates(
+        public async Task<bool> TryHandleSortItem(
             EnhancedClientSession session,
-            DeathTowerSession tower,
-            IReadOnlyList<short> slots)
+            GamePacketHeader header,
+            byte[] body)
         {
-            var mainSlots = new List<short>();
-            var quickSlots = new List<short>();
-            foreach (var slot in slots)
-            {
-                var itemSpace = ItemSlotBoundService.IsMainQuickSlot(slot)
-                    ? InventoryListType.QuickSlot
-                    : InventoryListType.Main;
+            if (!TryCaptureTowerCommandContext(
+                    session,
+                    out var runIdentity,
+                    out var tower))
+                return false;
 
-                if (itemSpace == InventoryListType.QuickSlot)
-                    AddSlot(quickSlots, slot);
-                else
-                    AddSlot(mainSlots, slot);
+            if (!DeathTowerInventoryCommandParser.TryParseSort(
+                    body,
+                    out var command))
+            {
+                FileLogger.Log(
+                    $"[DeathTower] SORT rejected: invalid body length "
+                    + $"cid={session?.Player?.CharacterId ?? 0}");
+                return true;
+            }
+            if (!TryGetOwnedInventoryLease(session, out var lease)
+                || !IsCurrentTowerCommandContext(
+                    session,
+                    runIdentity,
+                    tower,
+                    lease))
+                return true;
+
+            var success = _transientInventory.TrySort(
+                tower,
+                lease,
+                command.ListType,
+                command.Category,
+                command.HasCategory,
+                out var handled,
+                out var result);
+            if (!handled)
+                return false;
+            if (!success || !result.Success)
+            {
+                FileLogger.Log(
+                    $"[DeathTower] SORT_ITEM rejected: " +
+                    $"cid={session.Player.CharacterId} list={command.ListType} " +
+                    $"category={command.Category} hasCategory={command.HasCategory}");
+                return true;
             }
 
-            await SendTowerItemUpdates(session, tower, InventoryListType.QuickSlot, quickSlots);
-            await SendTowerItemUpdates(session, tower, InventoryListType.Main, mainSlots);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x0014,
+                SortItemAckBuilder.Build(command.ListType)));
+            await SendInventorySnapshotAsync(session, tower, lease);
+            return true;
         }
 
-        private static async Task SendTowerItemUpdates(
+        public async Task<bool> TryHandleDeleteItem(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (!TryCaptureTowerCommandContext(
+                    session,
+                    out var runIdentity,
+                    out var tower))
+                return false;
+            if (!DeathTowerInventoryCommandParser.TryParseDelete(
+                    body,
+                    out var command))
+            {
+                return false;
+            }
+            if (!TryGetOwnedInventoryLease(session, out var lease)
+                || !IsCurrentTowerCommandContext(
+                    session,
+                    runIdentity,
+                    tower,
+                    lease))
+                return true;
+
+            var success = _transientInventory.TryDeleteSkillMaterials(
+                tower,
+                lease,
+                command,
+                out var handled,
+                out var result);
+            if (!handled)
+                return false;
+            if (!success || !result.Success)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0012,
+                    DeleteItemAckBuilder.BuildError((byte)command.ListType)));
+                FileLogger.Log(
+                    $"[DeathTower] DELETE_ITEM skill material rejected: " +
+                    $"cid={session.Player.CharacterId} entries={command.Entries.Count}");
+                return true;
+            }
+
+            foreach (var mutation in result.Mutations)
+            {
+                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                    0x01,
+                    0x0012,
+                    DeleteItemAckBuilder.Build(mutation)));
+            }
+            await SendInventorySnapshotAsync(session, tower, lease);
+            foreach (var itemId in result.TransientItemIds)
+                RecalibrateTowerQuestProgress(session, tower, itemId);
+            return true;
+        }
+
+        private static async Task SendInventorySnapshotAsync(
             EnhancedClientSession session,
             DeathTowerSession tower,
-            InventoryListType listType,
-            IReadOnlyList<short> slots)
+            InventoryLease lease)
         {
-            if (slots == null || slots.Count == 0)
+            if (session == null || tower == null || lease == null)
                 return;
 
-            var writer = new GamePacketWriter();
-            writer.WriteByte((byte)listType);
-            writer.WriteUInt16((ushort)slots.Count);
-            foreach (var slot in slots)
+            byte[] body;
+            lock (lease.SyncRoot)
             {
-                if (tower.TryGetInventoryItem(slot, out var item))
-                    ItemListProtocolWriter.WriteCommonEntry84(writer, slot, CreateTowerItemCore(item));
-                else
-                    ItemListProtocolWriter.WriteEmptyEntry(writer, listType, slot);
+                body = DeathTowerInventoryProjectionBuilder.BuildFullListBody(
+                    tower,
+                    lease.Inventory);
             }
 
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x000E, writer.ToArray()));
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x000D,
+                body));
         }
 
-        private static ItemCore CreateTowerItemCore(TowerInventoryItem item)
+        private static bool TryGetOwnedInventoryLease(
+            EnhancedClientSession session,
+            out InventoryLease lease)
         {
-            var itemKind = ItemCore.KindConsumable;
-            if (item != null && ItemMetadataResolver.TryResolveItemKind(item.ItemId, out var resolvedKind))
-                itemKind = resolvedKind;
-
-            var core = ItemCore.Create(itemKind, item?.ItemId ?? 0);
-            core.Count = item?.Count ?? 0;
-            return core;
+            lease = null;
+            var player = session?.Player;
+            return player != null
+                && InventoryContext.TryGetOwnedLease(
+                    session.SessionId,
+                    player.CharacterId,
+                    out lease);
         }
 
-        private static void AddSlot(List<short> slots, short slot)
+        private static bool TryCaptureTowerCommandContext(
+            EnhancedClientSession session,
+            out GameDungeon.DungeonRunIdentity runIdentity,
+            out DeathTowerSession tower)
         {
-            if (!slots.Contains(slot))
-                slots.Add(slot);
+            runIdentity = default;
+            tower = null;
+            var player = session?.Player;
+            var run = player?.CurrentRun;
+            if (run?.Tower == null)
+                return false;
+
+            runIdentity = run.CaptureIdentity();
+            if (!player.IsCurrentDungeonRun(runIdentity))
+                return false;
+
+            tower = run.Tower;
+            return true;
         }
 
-        private static bool IsSupportedTowerEndpoint(InventoryListType listType, short slot)
-            => listType == InventoryListType.Main
-                || (listType == InventoryListType.QuickSlot
-                    && ItemSlotBoundService.IsMainQuickSlot(slot));
-
-        private static bool IsTowerEndpoint(
-            InventoryListType listType,
-            short slot,
-            DeathTowerSession tower)
-            => IsSupportedTowerEndpoint(listType, slot)
-                && (ItemSlotBoundService.IsMainQuickSlot(slot)
-                    || tower.InventoryItems.ContainsKey(slot));
+        private static bool IsCurrentTowerCommandContext(
+            EnhancedClientSession session,
+            GameDungeon.DungeonRunIdentity runIdentity,
+            DeathTowerSession tower,
+            InventoryLease lease)
+        {
+            var player = session?.Player;
+            return player != null
+                && tower != null
+                && player.IsCurrentDungeonRun(runIdentity)
+                && ReferenceEquals(player.CurrentRun?.Tower, tower)
+                && InventoryContext.IsCurrentLease(
+                    lease,
+                    session.SessionId,
+                    player.CharacterId);
+        }
 
         private static void RecalibrateTowerQuestProgress(
             EnhancedClientSession session,

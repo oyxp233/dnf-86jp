@@ -363,7 +363,11 @@ namespace PvfLib
 
         #endregion
 
-        public List<SpecialPassiveObjectItem> SpecialPassiveObjectItems { get; set; } = new List<SpecialPassiveObjectItem>();
+        public IReadOnlyList<SpecialPassiveObjectItemGroup>
+            SpecialPassiveObjectItemGroups { get; private set; } =
+                Array.Empty<SpecialPassiveObjectItemGroup>();
+        public bool SpecialPassiveObjectItemDefinitionPresent { get; private set; }
+        public bool SpecialPassiveObjectItemDefinitionMalformed { get; private set; }
 
         /// <summary>迷宫变体列表（以 [maze info] 为分隔）</summary>
         public List<MazeInfo> Mazes { get; set; } = new List<MazeInfo>();
@@ -508,8 +512,7 @@ namespace PvfLib
                         dgn.QuestConnection = ParseIntArray(data);
                         break;
                     case "special passive object item":
-                        try { ParseSpecialPassiveObjectItem(data, dgn); }
-                        catch { }
+                        ParseSpecialPassiveObjectItem(data, dgn);
                         break;
 
                     // --- int ---
@@ -809,33 +812,86 @@ namespace PvfLib
 
         private static void ParseSpecialPassiveObjectItem(string data, DungeonFile dgn)
         {
-            // Multi-group format: levelOverride flag count [itemId dropRate]... repeated
-            // Each group = one stDungeonAssignItem_t entry
-            var vals = ParseIntArray(data);
-            if (vals == null || vals.Length < 3)
+            if (dgn == null)
                 return;
 
-            int pos = 0;
-            int idx = 0;
-            while (pos + 2 < vals.Length)
+            if (dgn.SpecialPassiveObjectItemDefinitionPresent)
             {
-                int levelOverride = vals[pos];
-                int flag = vals[pos + 1];
-                int count = vals[pos + 2];
-                pos += 3;
-                for (int i = 0; i < count && pos + 1 < vals.Length; i++)
-                {
-                    dgn.SpecialPassiveObjectItems.Add(new SpecialPassiveObjectItem
-                    {
-                        Index = idx,
-                        LevelOverride = levelOverride,
-                        ItemId = vals[pos],
-                        DropRate = vals[pos + 1],
-                    });
-                    pos += 2;
-                }
-                idx++;
+                DisableSpecialPassiveObjectItems(dgn);
+                return;
             }
+
+            dgn.SpecialPassiveObjectItemDefinitionPresent = true;
+            if (string.IsNullOrWhiteSpace(data))
+                return;
+
+            var tokens = ScriptValueTokenizer.Tokenize(data);
+            var values = new int[tokens.Count];
+            for (var index = 0; index < tokens.Count; index++)
+            {
+                if (!int.TryParse(
+                        tokens[index],
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out values[index]))
+                {
+                    DisableSpecialPassiveObjectItems(dgn);
+                    return;
+                }
+            }
+
+            var groups = new List<SpecialPassiveObjectItemGroup>();
+            var position = 0;
+            while (position < values.Length)
+            {
+                if (values.Length - position < 3)
+                {
+                    DisableSpecialPassiveObjectItems(dgn);
+                    return;
+                }
+
+                var groupIndex = values[position++];
+                var levelOverride = values[position++];
+                var itemCount = values[position++];
+                if (groupIndex != groups.Count
+                    || levelOverride < -1
+                    || itemCount < 0
+                    || (long)itemCount * 2 > values.Length - position)
+                {
+                    DisableSpecialPassiveObjectItems(dgn);
+                    return;
+                }
+
+                var items = new SpecialPassiveObjectItem[itemCount];
+                for (var itemIndex = 0; itemIndex < itemCount; itemIndex++)
+                {
+                    var itemId = values[position++];
+                    var weight = values[position++];
+                    if (itemId <= 0 || weight < 0)
+                    {
+                        DisableSpecialPassiveObjectItems(dgn);
+                        return;
+                    }
+
+                    items[itemIndex] = new SpecialPassiveObjectItem(
+                        itemId,
+                        weight);
+                }
+
+                groups.Add(new SpecialPassiveObjectItemGroup(
+                    groupIndex,
+                    levelOverride,
+                    items));
+            }
+
+            dgn.SpecialPassiveObjectItemGroups = groups.ToArray();
+        }
+
+        private static void DisableSpecialPassiveObjectItems(DungeonFile dgn)
+        {
+            dgn.SpecialPassiveObjectItemGroups =
+                Array.Empty<SpecialPassiveObjectItemGroup>();
+            dgn.SpecialPassiveObjectItemDefinitionMalformed = true;
         }
 
         private static string AppendRequiredItems(
@@ -1558,11 +1614,32 @@ namespace PvfLib
         public int[] MapCandidates { get; set; }
     }
 
-    public class SpecialPassiveObjectItem
+    public sealed class SpecialPassiveObjectItemGroup
     {
-        public int Index { get; set; }
-        public int LevelOverride { get; set; }
-        public int ItemId { get; set; }
-        public int DropRate { get; set; }
+        public SpecialPassiveObjectItemGroup(
+            int groupIndex,
+            int levelOverride,
+            IReadOnlyList<SpecialPassiveObjectItem> items)
+        {
+            GroupIndex = groupIndex;
+            LevelOverride = levelOverride;
+            Items = items ?? Array.Empty<SpecialPassiveObjectItem>();
+        }
+
+        public int GroupIndex { get; }
+        public int LevelOverride { get; }
+        public IReadOnlyList<SpecialPassiveObjectItem> Items { get; }
+    }
+
+    public readonly struct SpecialPassiveObjectItem
+    {
+        public SpecialPassiveObjectItem(int itemId, int weight)
+        {
+            ItemId = itemId;
+            Weight = weight;
+        }
+
+        public int ItemId { get; }
+        public int Weight { get; }
     }
 }

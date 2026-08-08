@@ -81,6 +81,58 @@ namespace DfoServer.Network.Handlers
             }
         }
 
+        internal static async Task<bool> TrySendOwnedItemListRefresh(
+            EnhancedClientSession session,
+            InventoryLease expectedLease,
+            InventoryListType listType,
+            Func<bool> projectionGuard)
+        {
+            var player = session?.Player;
+            if (player == null
+                || expectedLease == null
+                || projectionGuard == null
+                || !projectionGuard()
+                || !InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    session.SessionId,
+                    player.CharacterId))
+            {
+                return false;
+            }
+
+            byte[] body;
+            lock (expectedLease.SyncRoot)
+            {
+                if (!InventoryContext.IsCurrentLease(
+                        expectedLease,
+                        session.SessionId,
+                        player.CharacterId)
+                    || !projectionGuard())
+                {
+                    return false;
+                }
+
+                body = ItemListPacketBuilder.BuildItemSpaceListBody(
+                    expectedLease.Inventory,
+                    listType);
+            }
+
+            if (!InventoryContext.IsCurrentLease(
+                    expectedLease,
+                    session.SessionId,
+                    player.CharacterId)
+                || !projectionGuard())
+            {
+                return false;
+            }
+
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x000D,
+                body));
+            return true;
+        }
+
         public Task SendUpdateItemList(EnhancedClientSession session, InventoryListType itemSpace, short slotIndex)
         {
             return SendUpdateItemList(session, itemSpace, new[] { slotIndex });

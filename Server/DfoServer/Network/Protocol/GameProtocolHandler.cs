@@ -449,7 +449,12 @@ namespace DfoServer.Network
 
         private void RegisterInventoryHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
-            d[0x0012] = _inventoryHandler.Handle_ENUM_CMDPACKET_DELETE_ITEM;       //18
+            d[0x0012] = async (s, h, b) =>
+            {
+                if (await _dungeonHandler.TryHandleDeathTowerDeleteItem(s, h, b))
+                    return;
+                await _inventoryHandler.Handle_ENUM_CMDPACKET_DELETE_ITEM(s, h, b);
+            };                                                                    //18
             d[0x0013] = async (s, h, b) =>
             {
                 if (await _dungeonHandler.TryHandleDeathTowerMoveItem(s, h, b))
@@ -458,7 +463,12 @@ namespace DfoServer.Network
                     return;
                 await _inventoryHandler.Handle_ENUM_CMDPACKET_MOVE_ITEMSPACE(s, h, b);
             };                                                                    //19
-            d[0x0014] = _inventoryHandler.Handle_ENUM_CMDPACKET_SORT_ITEM;         //20
+            d[0x0014] = async (s, h, b) =>
+            {
+                if (await _dungeonHandler.TryHandleDeathTowerSortItem(s, h, b))
+                    return;
+                await _inventoryHandler.Handle_ENUM_CMDPACKET_SORT_ITEM(s, h, b);
+            };                                                                    //20
             d[0x0015] = _inventoryHandler.Handle_ENUM_CMDPACKET_BUY_ITEM;          //21
             d[0x0016] = _inventoryHandler.Handle_ENUM_CMDPACKET_SELL_ITEM;         //22
             d[0x0017] = _inventoryHandler.Handle_ENUM_CMDPACKET_REPAIR_EQUIPMENT;  //23 装备修理

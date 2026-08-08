@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 
 namespace DfoServer.Game.DeathTower
 {
@@ -11,9 +13,8 @@ namespace DfoServer.Game.DeathTower
         private readonly Dictionary<ushort, DropInfo> _groundItems =
             new Dictionary<ushort, DropInfo>();
         private readonly HashSet<ushort> _deadMonsters = new HashSet<ushort>();
-        private readonly Dictionary<short, TowerInventoryItem> _inventoryItems =
-            new Dictionary<short, TowerInventoryItem>();
-        private readonly HashSet<short> _persistentMainSlots = new HashSet<short>();
+        private readonly Dictionary<DeathTowerInventoryEndpoint, TowerInventoryItem> _inventoryItems =
+            new Dictionary<DeathTowerInventoryEndpoint, TowerInventoryItem>();
         private readonly HashSet<int> _seenItemIds = new HashSet<int>();
         private DnfLcg _stageLcg;
 
@@ -26,7 +27,8 @@ namespace DfoServer.Game.DeathTower
         public uint StageSeed { get; private set; }
         internal DnfLcg StageLcg => _stageLcg;
         public IReadOnlyDictionary<ushort, DropInfo> GroundItems => _groundItems;
-        public IReadOnlyDictionary<short, TowerInventoryItem> InventoryItems => _inventoryItems;
+        public IReadOnlyDictionary<DeathTowerInventoryEndpoint, TowerInventoryItem> InventoryItems
+            => _inventoryItems;
         public IReadOnlyCollection<int> SeenItemIds => _seenItemIds;
 
         public DeathTowerSession(DeathTowerData.TowerConfig config)
@@ -120,6 +122,26 @@ namespace DfoServer.Game.DeathTower
         }
 
         public bool TryPickupGroundItem(ushort sceneSlot, out TowerPickupResult result)
+            => TryPickupGroundItem(
+                sceneSlot,
+                ItemSlotBoundService.MainExpandStageFull,
+                out result);
+
+        internal bool TryPickupGroundItem(
+            ushort sceneSlot,
+            int mainExpandStageKey,
+            out TowerPickupResult result)
+            => TryPickupGroundItem(
+                sceneSlot,
+                mainExpandStageKey,
+                null,
+                out result);
+
+        internal bool TryPickupGroundItem(
+            ushort sceneSlot,
+            int mainExpandStageKey,
+            Func<DeathTowerInventoryEndpoint, bool> isPersistentSlotOccupied,
+            out TowerPickupResult result)
         {
             result = null;
             if (!_groundItems.TryGetValue(sceneSlot, out var drop)
@@ -132,26 +154,45 @@ namespace DfoServer.Game.DeathTower
             }
 
             var itemId = (int)drop.TemplateId;
-            if (!TryAddInventoryItem(itemId, (int)drop.StackCount, out var destination, out var changedSlots))
+            if (!TryAddInventoryItem(
+                    itemId,
+                    (int)drop.StackCount,
+                    mainExpandStageKey,
+                    isPersistentSlotOccupied,
+                    out var destination,
+                    out var changedEndpoints))
                 return false;
 
             _groundItems.Remove(sceneSlot);
             _seenItemIds.Add(itemId);
             result = new TowerPickupResult
             {
-                DestinationSlot = destination,
+                DestinationEndpoint = destination,
+                DestinationSlot = destination.SlotIndex,
                 ItemId = itemId,
-                ChangedSlots = changedSlots,
+                ChangedSlots = changedEndpoints
+                    .Select(endpoint => endpoint.SlotIndex)
+                    .ToArray(),
+                ChangedEndpoints = changedEndpoints,
             };
             return true;
         }
 
         public bool TryUseItem(short slot, int expectedItemId, out TowerInventoryMutation result)
+            => TryUseItem(
+                ResolveLegacyEndpoint(slot),
+                expectedItemId,
+                out result);
+
+        internal bool TryUseItem(
+            DeathTowerInventoryEndpoint endpoint,
+            int expectedItemId,
+            out TowerInventoryMutation result)
         {
             result = null;
-            if (!_inventoryItems.TryGetValue(slot, out var item)
+            if (!_inventoryItems.TryGetValue(endpoint, out var item)
                 || item.ItemId != expectedItemId
-                || !item.IsWaste
+                || (!item.IsQuickSlotConsumable && !item.IsWaste)
                 || item.Count <= 0)
             {
                 return false;
@@ -160,13 +201,14 @@ namespace DfoServer.Game.DeathTower
             item.Count--;
             var remaining = item.Count;
             if (remaining == 0)
-                _inventoryItems.Remove(slot);
+                _inventoryItems.Remove(endpoint);
 
             result = new TowerInventoryMutation
             {
                 ItemId = item.ItemId,
                 RemainingCount = remaining,
-                ChangedSlots = new[] { slot },
+                ChangedSlots = new[] { endpoint.SlotIndex },
+                Endpoint = endpoint,
             };
             return true;
         }
@@ -176,21 +218,54 @@ namespace DfoServer.Game.DeathTower
             short destinationSlot,
             int requestedCount,
             out TowerInventoryMoveResult result)
+            => TryMoveItem(
+                ResolveLegacyEndpoint(sourceSlot),
+                ResolveLegacyEndpoint(destinationSlot),
+                requestedCount,
+                out result);
+
+        internal bool TryMoveItem(
+            DeathTowerInventoryEndpoint sourceEndpoint,
+            DeathTowerInventoryEndpoint destinationEndpoint,
+            int requestedCount,
+            out TowerInventoryMoveResult result)
+            => TryMoveItem(
+                sourceEndpoint,
+                destinationEndpoint,
+                requestedCount,
+                null,
+                out result);
+
+        internal bool TryMoveItem(
+            DeathTowerInventoryEndpoint sourceEndpoint,
+            DeathTowerInventoryEndpoint destinationEndpoint,
+            int requestedCount,
+            Func<DeathTowerInventoryEndpoint, bool> isPersistentSlotOccupied,
+            out TowerInventoryMoveResult result)
         {
             result = null;
-            if (!_inventoryItems.TryGetValue(sourceSlot, out var source))
+            if (!_inventoryItems.TryGetValue(sourceEndpoint, out var source))
                 return false;
-            if (_persistentMainSlots.Contains(destinationSlot))
-                return false;
-
             var sourceMetadata = Inventory.ItemMetadataResolver.Resolve(source.ItemId);
-            if (!DeathTowerItemSlotPolicy.IsSlotAllowed(sourceMetadata, destinationSlot))
+            if (!DeathTowerItemSlotPolicy.IsSlotAllowed(sourceMetadata, destinationEndpoint))
                 return false;
 
-            if (sourceSlot == destinationSlot)
+            if (sourceEndpoint.Equals(destinationEndpoint))
             {
-                result = CreateMoveResult(requestedCount, Array.Empty<short>());
+                result = CreateMoveResult(
+                    requestedCount,
+                    Array.Empty<DeathTowerInventoryEndpoint>());
                 return true;
+            }
+
+            // Main is a shared physical coordinate space. A tower overlay may
+            // never hide or overwrite an online item in that space. QuickSlot
+            // remains a separate typed endpoint and is intentionally excluded.
+            if (IsPersistentMainSlotOccupied(
+                    destinationEndpoint,
+                    isPersistentSlotOccupied))
+            {
+                return false;
             }
 
             var moveCount = requestedCount <= 0
@@ -199,16 +274,16 @@ namespace DfoServer.Game.DeathTower
             if (moveCount <= 0)
                 return false;
 
-            if (!_inventoryItems.TryGetValue(destinationSlot, out var destination))
+            if (!_inventoryItems.TryGetValue(destinationEndpoint, out var destination))
             {
                 var moved = CreateInventoryItem(source.ItemId, moveCount, sourceMetadata);
-                _inventoryItems[destinationSlot] = moved;
+                _inventoryItems[destinationEndpoint] = moved;
                 source.Count -= moveCount;
                 if (source.Count == 0)
-                    _inventoryItems.Remove(sourceSlot);
+                    _inventoryItems.Remove(sourceEndpoint);
                 result = CreateMoveResult(
                     requestedCount,
-                    new[] { sourceSlot, destinationSlot });
+                    new[] { sourceEndpoint, destinationEndpoint });
                 return true;
             }
 
@@ -221,44 +296,90 @@ namespace DfoServer.Game.DeathTower
                 destination.Count += merged;
                 source.Count -= merged;
                 if (source.Count == 0)
-                    _inventoryItems.Remove(sourceSlot);
+                    _inventoryItems.Remove(sourceEndpoint);
                 result = CreateMoveResult(
                     requestedCount,
-                    new[] { sourceSlot, destinationSlot });
+                    new[] { sourceEndpoint, destinationEndpoint });
                 return true;
             }
 
             if (moveCount != source.Count)
                 return false;
             var destinationMetadata = Inventory.ItemMetadataResolver.Resolve(destination.ItemId);
-            if (!DeathTowerItemSlotPolicy.IsSlotAllowed(destinationMetadata, sourceSlot))
+            if (!DeathTowerItemSlotPolicy.IsSlotAllowed(destinationMetadata, sourceEndpoint))
                 return false;
 
-            _inventoryItems[sourceSlot] = destination;
-            _inventoryItems[destinationSlot] = source;
+            _inventoryItems[sourceEndpoint] = destination;
+            _inventoryItems[destinationEndpoint] = source;
             result = CreateMoveResult(
                 requestedCount,
-                new[] { sourceSlot, destinationSlot });
+                new[] { sourceEndpoint, destinationEndpoint });
             return true;
         }
 
         public bool TryGetInventoryItem(short slot, out TowerInventoryItem item)
-            => _inventoryItems.TryGetValue(slot, out item);
+            => TryGetInventoryItem(ResolveLegacyEndpoint(slot), out item);
 
-        public void SetPersistentMainSlotOccupancy(IEnumerable<short> occupiedSlots)
+        internal bool TryGetInventoryItem(
+            DeathTowerInventoryEndpoint endpoint,
+            out TowerInventoryItem item)
+            => _inventoryItems.TryGetValue(endpoint, out item);
+
+        internal IReadOnlyList<DeathTowerInventoryEndpoint> FindInventoryEndpointsByItemId(
+            int itemId)
         {
-            _persistentMainSlots.Clear();
-            if (occupiedSlots == null)
+            if (itemId <= 0)
+                return Array.Empty<DeathTowerInventoryEndpoint>();
+
+            var result = new List<DeathTowerInventoryEndpoint>();
+            foreach (var pair in _inventoryItems)
+            {
+                if (pair.Value != null && pair.Value.ItemId == itemId)
+                    result.Add(pair.Key);
+            }
+            return result;
+        }
+
+        internal Dictionary<DeathTowerInventoryEndpoint, TowerInventoryItem> CopyInventoryItems()
+        {
+            var result = new Dictionary<DeathTowerInventoryEndpoint, TowerInventoryItem>();
+            foreach (var pair in _inventoryItems)
+                result[pair.Key] = pair.Value.Copy();
+            return result;
+        }
+
+        internal void ReplaceInventoryItems(
+            IReadOnlyDictionary<DeathTowerInventoryEndpoint, TowerInventoryItem> items)
+        {
+            _inventoryItems.Clear();
+            if (items == null)
                 return;
 
-            foreach (var slot in occupiedSlots)
+            foreach (var pair in items)
             {
-                // Death Tower owns its temporary 3-8 quickbar view. Persistent quickbar
-                // occupancy must never change tower pickup order.
-                if (Inventory.ItemSlotBoundService.IsMainQuickSlot(slot))
+                if (pair.Value == null
+                    || pair.Value.ItemId <= 0
+                    || pair.Value.Count <= 0)
+                {
                     continue;
-                _persistentMainSlots.Add(slot);
+                }
+
+                _inventoryItems[pair.Key] = pair.Value.Copy();
             }
+        }
+
+        internal void ReplaceInventoryItems(
+            IReadOnlyDictionary<short, TowerInventoryItem> items)
+        {
+            var typed = new Dictionary<DeathTowerInventoryEndpoint, TowerInventoryItem>();
+            if (items != null)
+            {
+                foreach (var pair in items)
+                {
+                    typed[ResolveLegacyEndpoint(pair.Key)] = pair.Value;
+                }
+            }
+            ReplaceInventoryItems(typed);
         }
 
         public IReadOnlyDictionary<int, int> GetItemCountsSnapshot()
@@ -306,33 +427,64 @@ namespace DfoServer.Game.DeathTower
         private bool TryAddInventoryItem(
             int itemId,
             int count,
-            out short destinationSlot,
-            out IReadOnlyList<short> changedSlots)
+            int mainExpandStageKey,
+            Func<DeathTowerInventoryEndpoint, bool> isPersistentSlotOccupied,
+            out DeathTowerInventoryEndpoint destinationEndpoint,
+            out IReadOnlyList<DeathTowerInventoryEndpoint> changedEndpoints)
         {
-            destinationSlot = -1;
-            changedSlots = Array.Empty<short>();
+            destinationEndpoint = default;
+            changedEndpoints = Array.Empty<DeathTowerInventoryEndpoint>();
             if (itemId <= 0 || count <= 0)
                 return false;
 
             var metadata = Inventory.ItemMetadataResolver.Resolve(itemId);
             var stackLimit = DeathTowerItemSlotPolicy.ResolveStackLimit(metadata);
-            var allocationOrder = DeathTowerItemSlotPolicy.GetAllocationOrder(metadata);
+            var allocationOrder = DeathTowerItemSlotPolicy.GetAllocationOrder(
+                itemId,
+                metadata,
+                mainExpandStageKey);
+            var allocationEndpoints = new HashSet<DeathTowerInventoryEndpoint>(
+                allocationOrder);
+            var mergeOrder = allocationOrder
+                .Where(endpoint => _inventoryItems.ContainsKey(endpoint))
+                .Concat(_inventoryItems.Keys
+                    .Where(endpoint => !allocationEndpoints.Contains(endpoint)
+                        && DeathTowerItemSlotPolicy.IsSlotAllowed(
+                            metadata,
+                            endpoint))
+                    .OrderBy(endpoint => endpoint.ListType)
+                    .ThenBy(endpoint => endpoint.SlotIndex))
+                .ToArray();
             var remaining = count;
-            var additions = new Dictionary<short, int>();
+            var additions = new Dictionary<DeathTowerInventoryEndpoint, int>();
 
-            foreach (var slot in allocationOrder)
+            foreach (var endpoint in mergeOrder)
             {
-                if (!_inventoryItems.TryGetValue(slot, out var existing)
-                    || existing.ItemId != itemId
-                    || existing.Count >= stackLimit)
+                if (IsPersistentMainSlotOccupied(
+                        endpoint,
+                        isPersistentSlotOccupied))
                 {
                     continue;
                 }
 
-                var add = Math.Min(remaining, stackLimit - existing.Count);
+                if (!_inventoryItems.TryGetValue(endpoint, out var existing)
+                    || existing.ItemId != itemId)
+                {
+                    continue;
+                }
+
+                var endpointStackLimit = existing.StackLimit > 0
+                    ? Math.Min(stackLimit, existing.StackLimit)
+                    : stackLimit;
+                if (existing.Count >= endpointStackLimit)
+                    continue;
+
+                var add = Math.Min(
+                    remaining,
+                    endpointStackLimit - existing.Count);
                 if (add <= 0)
                     continue;
-                additions[slot] = add;
+                additions[endpoint] = add;
                 remaining -= add;
                 if (remaining == 0)
                     break;
@@ -340,14 +492,20 @@ namespace DfoServer.Game.DeathTower
 
             if (remaining > 0)
             {
-                foreach (var slot in allocationOrder)
+                foreach (var endpoint in allocationOrder)
                 {
-                    if (_inventoryItems.ContainsKey(slot)
-                        || additions.ContainsKey(slot)
-                        || _persistentMainSlots.Contains(slot))
+                    if (IsPersistentMainSlotOccupied(
+                            endpoint,
+                            isPersistentSlotOccupied))
+                    {
+                        continue;
+                    }
+
+                    if (_inventoryItems.ContainsKey(endpoint)
+                        || additions.ContainsKey(endpoint))
                         continue;
                     var add = Math.Min(remaining, stackLimit);
-                    additions[slot] = add;
+                    additions[endpoint] = add;
                     remaining -= add;
                     if (remaining == 0)
                         break;
@@ -357,7 +515,7 @@ namespace DfoServer.Game.DeathTower
             if (remaining > 0)
                 return false;
 
-            var changed = new List<short>();
+            var changed = new List<DeathTowerInventoryEndpoint>();
             foreach (var entry in additions)
             {
                 if (_inventoryItems.TryGetValue(entry.Key, out var existing))
@@ -374,9 +532,20 @@ namespace DfoServer.Game.DeathTower
                 changed.Add(entry.Key);
             }
 
-            destinationSlot = changed[0];
-            changedSlots = changed;
+            destinationEndpoint = changed[0];
+            changedEndpoints = changed;
             return true;
+        }
+
+        private static bool IsPersistentMainSlotOccupied(
+            DeathTowerInventoryEndpoint endpoint,
+            Func<DeathTowerInventoryEndpoint, bool> isPersistentSlotOccupied)
+        {
+            return isPersistentSlotOccupied != null
+                && endpoint.ListType == InventoryListType.Main
+                && endpoint.SlotIndex >= InventoryService.MainSlotStart
+                && endpoint.SlotIndex <= InventoryService.MainSlotEnd
+                && isPersistentSlotOccupied(endpoint);
         }
 
         private static TowerInventoryItem CreateInventoryItem(
@@ -389,19 +558,32 @@ namespace DfoServer.Game.DeathTower
                 ItemId = itemId,
                 Count = count,
                 StackLimit = DeathTowerItemSlotPolicy.ResolveStackLimit(metadata),
+                IsQuickSlotConsumable = DeathTowerItemSlotPolicy.IsQuickSlotConsumable(metadata),
                 IsWaste = DeathTowerItemSlotPolicy.IsWaste(metadata),
             };
         }
 
         private static TowerInventoryMoveResult CreateMoveResult(
             int moveValue32,
-            IReadOnlyList<short> changedSlots)
+            IReadOnlyList<DeathTowerInventoryEndpoint> changedEndpoints)
         {
             return new TowerInventoryMoveResult
             {
                 MoveValue32 = moveValue32,
-                ChangedSlots = changedSlots,
+                ChangedSlots = changedEndpoints
+                    .Select(endpoint => endpoint.SlotIndex)
+                    .ToArray(),
+                ChangedEndpoints = changedEndpoints,
             };
+        }
+
+        private static DeathTowerInventoryEndpoint ResolveLegacyEndpoint(short slot)
+        {
+            return new DeathTowerInventoryEndpoint(
+                ItemSlotBoundService.IsMainQuickSlot(slot)
+                    ? InventoryListType.QuickSlot
+                    : InventoryListType.Main,
+                slot);
         }
     }
 }

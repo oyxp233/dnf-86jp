@@ -1132,10 +1132,10 @@ namespace DfoServer.Game.Inventory
             if (stackableType == "material expert job")
                 return ItemCore.KindExpertJobMaterial;
 
-            if (stackableType == "quest")
+            if (metadata.IsPrimaryStackableFamily("quest"))
                 return ItemCore.KindQuest;
 
-            if (stackableType == "material")
+            if (metadata.IsPrimaryStackableFamily("material"))
                 return IsSpecialMaterialItem(itemTemplateId)
                     ? ItemCore.KindSpecialMaterial
                     : ItemCore.KindMaterial;

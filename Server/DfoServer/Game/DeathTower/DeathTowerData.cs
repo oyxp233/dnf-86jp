@@ -37,6 +37,8 @@ namespace DfoServer.Game.DeathTower
                 int basisLevel,
                 int maxClearItemCount,
                 bool itemDropsEnabled,
+                bool usesFpCubePiece,
+                bool limitsStackableItems,
                 DeathTowerRewardProfile rewardProfile,
                 IReadOnlyList<TowerEntryItem> requiredEntryItems,
                 IReadOnlyList<TowerEntryItem> addedRequiredEntryItems)
@@ -55,6 +57,8 @@ namespace DfoServer.Game.DeathTower
                 BasisLevel = basisLevel;
                 MaxClearItemCount = maxClearItemCount;
                 ItemDropsEnabled = itemDropsEnabled;
+                UsesFpCubePiece = usesFpCubePiece;
+                LimitsStackableItems = limitsStackableItems;
                 RewardProfile = rewardProfile;
                 RequiredEntryItems = Freeze(requiredEntryItems);
                 AddedRequiredEntryItems = Freeze(addedRequiredEntryItems);
@@ -66,6 +70,8 @@ namespace DfoServer.Game.DeathTower
             public int BasisLevel { get; }
             public int MaxClearItemCount { get; }
             public bool ItemDropsEnabled { get; }
+            public bool UsesFpCubePiece { get; }
+            public bool LimitsStackableItems { get; }
             public DeathTowerRewardProfile RewardProfile { get; }
             public IReadOnlyList<TowerEntryItem> RequiredEntryItems { get; }
             public IReadOnlyList<TowerEntryItem> AddedRequiredEntryItems { get; }
@@ -162,6 +168,9 @@ namespace DfoServer.Game.DeathTower
                     dungeon.BasisLevel,
                     maxClearItemCount,
                     itemDropsEnabled: dungeon.TowerItemDrop != 0,
+                    usesFpCubePiece: dungeon.TowerFpCubepiece == 1,
+                    limitsStackableItems:
+                        dungeon.TowerLimitOfStackableItem == 1,
                     rewardProfile,
                     ProjectEntryItems(dungeon.RequiredItems),
                     ProjectEntryItems(dungeon.AddedRequiredItems));
@@ -171,6 +180,8 @@ namespace DfoServer.Game.DeathTower
                     $"stages={config.TotalStages} basisLv={config.BasisLevel} " +
                     $"maxClearItems={config.MaxClearItemCount} " +
                     $"towerItems={config.ItemDropsEnabled} " +
+                    $"fpCubePiece={config.UsesFpCubePiece} " +
+                    $"limitStackable={config.LimitsStackableItems} " +
                     $"rewardProfile={config.RewardProfile} " +
                     $"required={config.RequiredEntryItems.Count} " +
                     $"addedRequired={config.AddedRequiredEntryItems.Count} " +

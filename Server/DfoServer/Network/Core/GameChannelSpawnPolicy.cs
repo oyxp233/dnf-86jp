@@ -54,10 +54,16 @@ namespace DfoServer.Network
 
     public static class GameChannelSpawnPolicy
     {
+        public const byte Channel100TownId = 17;
+        public const byte Channel100SpawnAreaId = 4;
+
         public static GameChannelSpawn Resolve(
             int listenerGamePort,
             int persistedTownId)
         {
+            if (TryResolveTransientSpawn(listenerGamePort, out var transientSpawn))
+                return transientSpawn;
+
             var townId = persistedTownId > 0
                 ? persistedTownId
                 : 1;
@@ -76,9 +82,44 @@ namespace DfoServer.Network
                 isTransient: false);
         }
 
+        public static bool TryResolveTransientSpawn(
+            int listenerGamePort,
+            out GameChannelSpawn spawn)
+        {
+            spawn = null;
+            if (!GameNetworkConfig.IsChannel100Listener(listenerGamePort))
+                return false;
+
+            if (!Town.TryGetDungeonGateReturnInfo(
+                    Channel100TownId,
+                    Channel100SpawnAreaId,
+                    out var gate))
+            {
+                throw new InvalidOperationException(
+                    $"Town {Channel100TownId} area " +
+                    $"{Channel100SpawnAreaId} has no dungeon-gate anchor.");
+            }
+
+            spawn = new GameChannelSpawn(
+                gate.Town,
+                gate.Area,
+                gate.X,
+                gate.Y,
+                direction: 5,
+                areaState: 3,
+                isTransient: true);
+            return true;
+        }
+
+        public static bool CanEnterTown(
+            int listenerGamePort,
+            int targetTownId)
+            => !GameNetworkConfig.IsChannel100Listener(listenerGamePort)
+               || targetTownId == Channel100TownId;
+
         public static bool ShouldPersistPosition(int listenerGamePort)
         {
-            return true;
+            return !GameNetworkConfig.IsChannel100Listener(listenerGamePort);
         }
     }
 }

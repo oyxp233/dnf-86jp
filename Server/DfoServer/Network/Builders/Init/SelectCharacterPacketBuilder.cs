@@ -26,17 +26,35 @@ namespace DfoServer.Network.Builders
                 dataSource,
                 characterId,
                 accountId,
+                skillOverride,
+                spawnOverride: null);
+
+        public static IEnumerable<byte[]> BuildPacketStream(
+            ISelectCharacterDataSource dataSource,
+            int characterId,
+            int accountId,
+            SkillInfoSnapshot skillOverride,
+            GameChannelSpawn spawnOverride)
+            => BuildPacketStream(
+                dataSource,
+                characterId,
+                accountId,
                 NewCharacterInitSequence.Build(),
-                skillOverride);
+                skillOverride,
+                spawnOverride);
 
         internal static IEnumerable<byte[]> BuildPacketStream(
             ISelectCharacterDataSource dataSource,
             int characterId,
             int accountId,
             List<SelectCharacterPacketTemplate> templates,
-            SkillInfoSnapshot skillOverride = null)
+            SkillInfoSnapshot skillOverride = null,
+            GameChannelSpawn spawnOverride = null)
         {
             var snapshot = dataSource.Load(characterId, accountId);
+
+            if (snapshot?.CharacterRecord != null && spawnOverride != null)
+                spawnOverride.ApplyTo(snapshot.CharacterRecord);
 
             if (skillOverride != null)
                 snapshot.InitializationSnapshot.SkillInfo = skillOverride;

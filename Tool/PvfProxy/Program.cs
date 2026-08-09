@@ -7,6 +7,8 @@ int chPort = 7001;
 int gamePort = 10011;
 int chTargetPort = 7002;
 int gameTargetPort = 10012;
+const int channel100Port = 10161;
+const int channel100TargetPort = 10162;
 string logDir = ".";
 string? serverPath = null;
 string serverArgs = "";
@@ -56,7 +58,10 @@ void Log(string line)
 }
 
 Log("=== PvfProxy Launcher ===");
-Log($"Proxy: ch={chPort}->{host}:{chTargetPort}, game={gamePort}->{host}:{gameTargetPort}");
+Log(
+    $"Proxy: ch={chPort}->{host}:{chTargetPort}, " +
+    $"game={gamePort}->{host}:{gameTargetPort}, " +
+    $"ch100={channel100Port}->{host}:{channel100TargetPort}");
 Log($"Log: {logPath}");
 
 var cts = new CancellationTokenSource();
@@ -137,6 +142,12 @@ try
     {
         RunProxy("CH", host, chPort, chTargetPort, cts.Token),
         RunProxy("GAME", host, gamePort, gameTargetPort, cts.Token),
+        RunProxy(
+            "GAME-CH100",
+            host,
+            channel100Port,
+            channel100TargetPort,
+            cts.Token),
     };
 
     await Task.Delay(300, cts.Token);

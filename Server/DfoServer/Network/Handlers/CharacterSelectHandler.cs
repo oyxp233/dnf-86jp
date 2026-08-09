@@ -211,8 +211,12 @@ namespace DfoServer.Network.Handlers
             }
         }
 
-        public async Task Handle_ENUM_CMDPACKET_SELECT_CHARACTER(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        internal async Task HandleResolvedSelectCharacterAsync(
+            EnhancedClientSession session,
+            CharacterRecord record,
+            int slot)
         {
+            GameChannelSpawn selectedSpawn = null;
             try
             {
                 // 换角色前丢弃上一个角色的副本局: PlayerContext 实例跨角色复用, 不丢会把
@@ -221,39 +225,6 @@ namespace DfoServer.Network.Handlers
                     session,
                     "select_character",
                     _dungeonInstances);
-
-                int slot = 0;
-                if (body != null && body.Length >= 2)
-                {
-                    slot = BitConverter.ToUInt16(body, 0);
-                }
-                else
-                {
-                    FileLogger.Log($"[{ProtocolName}] Select character body too short ({body?.Length ?? 0}B), defaulting slot=0");
-                }
-
-                CharacterRecord record = null;
-                if (session.Account != null)
-                {
-                    var list = _characterRepository.ListByAccount(session.Account.AccountId);
-                    if (list.Count == 0)
-                    {
-                        FileLogger.Log($"[{ProtocolName}] Select character: account_id={session.Account.AccountId} has 0 characters, falling back to seed character_id={_selectCharacterDataSource.GetSeedCharacterId()}");
-                    }
-                    else
-                    {
-                        if (slot < 0 || slot >= list.Count)
-                        {
-                            FileLogger.Log($"[{ProtocolName}] Select character slot={slot} out of range (count={list.Count}), clamping to 0");
-                            slot = 0;
-                        }
-                        record = list[slot];
-                    }
-                }
-                if (record == null)
-                {
-                    record = _characterRepository.GetById(_selectCharacterDataSource.GetSeedCharacterId());
-                }
 
                 if (record != null)
                 {
@@ -289,11 +260,12 @@ namespace DfoServer.Network.Handlers
                     var inventory = TryLoadInventoryForLease(
                         record.CharacterId,
                         ResolveAccountId(session, record));
+                    selectedSpawn = GameChannelSpawnPolicy.Resolve(
+                        session.ListenerPort,
+                        record.TownId);
                     session.Player.HydrateFrom(
                         record,
-                        GameChannelSpawnPolicy.Resolve(
-                            session.ListenerPort,
-                            record.TownId));
+                        selectedSpawn);
                     TryRegisterInventoryLease(session, record, inventory);
 
                     try
@@ -334,14 +306,18 @@ namespace DfoServer.Network.Handlers
                     }
 
                     session.Player.AppearanceEntries = record.Appearance ?? Array.Empty<CharacterAppearanceEntry>();
-                    _characterRepository.UpdatePosition(
-                        session.Player.CharacterId,
-                        session.Player.CurTownId,
-                        session.Player.CurAreaId,
-                        session.Player.CurPosX,
-                        session.Player.CurPosY,
-                        session.Player.CurDirection,
-                        session.Player.CurAreaState);
+                    if (GameChannelSpawnPolicy.ShouldPersistPosition(
+                            session.ListenerPort))
+                    {
+                        _characterRepository.UpdatePosition(
+                            session.Player.CharacterId,
+                            session.Player.CurTownId,
+                            session.Player.CurAreaId,
+                            session.Player.CurPosX,
+                            session.Player.CurPosY,
+                            session.Player.CurDirection,
+                            session.Player.CurAreaState);
+                    }
                     FileLogger.Log($"[{ProtocolName}] Select character hydrated session {session.SessionId} slot={slot} <- character_id={record.CharacterId} name={record.DisplayName} town={session.Player.CurTownId} area={session.Player.CurAreaId} pos=({session.Player.CurPosX},{session.Player.CurPosY})");
                 }
                 else
@@ -394,7 +370,8 @@ namespace DfoServer.Network.Handlers
                          _selectCharacterDataSource,
                          ownerCharId,
                          ownerAcctId,
-                         pvpSkillOverride))
+                         pvpSkillOverride,
+                         selectedSpawn))
                 await session.SendPacketAsync(packet);
 
             if (InventoryContext.TryGetLease(ownerCharId, out var inventoryLease)

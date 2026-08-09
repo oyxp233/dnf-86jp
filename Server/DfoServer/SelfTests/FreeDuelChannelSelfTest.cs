@@ -24,9 +24,11 @@ namespace DfoServer.SelfTests
                     includeFreeDuel: true);
             Check(
                 "startup listener gate keeps TCP 10068 fail-closed",
-                normalOnly.Count == 1
+                normalOnly.Count == 2
                 && normalOnly[0].ChannelId
                     == GameNetworkConfig.NormalChannelIndex
+                && normalOnly[1].ChannelId
+                    == GameNetworkConfig.Channel100Index
                 && normalOnly[0].PublicGamePort
                     == GameNetworkConfig.NormalGamePort
                 && normalOnly.All(
@@ -36,7 +38,7 @@ namespace DfoServer.SelfTests
                 ref failures);
             Check(
                 "enabled listener set binds distinct CH.68/TCP 10068",
-                withFreeDuel.Count == 2
+                withFreeDuel.Count == 3
                 && withFreeDuel.Any(
                     channel =>
                         channel.ChannelId
@@ -95,9 +97,11 @@ namespace DfoServer.SelfTests
                     includeFreeDuel: false);
             Check(
                 "disabled selector never publishes CH.68",
-                disabledSelector.Count == 1
+                disabledSelector.Count == 2
                 && disabledSelector[0].ChannelId
                     == GameNetworkConfig.NormalChannelIndex
+                && disabledSelector[1].ChannelId
+                    == GameNetworkConfig.Channel100Index
                 && disabledSelector[0].Port
                     == GameNetworkConfig.NormalGamePort,
                 ref failures);
@@ -112,7 +116,7 @@ namespace DfoServer.SelfTests
                     includeFreeDuel: true);
             Check(
                 "enabled selector publishes one CH.68 on TCP 10068",
-                enabledSelector.Count == 2
+                enabledSelector.Count == 3
                 && enabledSelector.Count(
                     channel =>
                         channel.ChannelId
@@ -137,6 +141,7 @@ namespace DfoServer.SelfTests
                         new[]
                         {
                             GameNetworkConfig.NormalChannelIndex,
+                            GameNetworkConfig.Channel100Index,
                             GameNetworkConfig.FreeDuelChannelIndex
                         }),
                 ref failures);
@@ -149,12 +154,12 @@ namespace DfoServer.SelfTests
             const int channelBlockSize = 48;
             const int channelPortOffset = 44;
             var freeDuelBlockOffset =
-                headerSize + channelBlockSize;
+                headerSize + channelBlockSize * 2;
             Check(
                 "selector wire block carries CH.68 name and TCP 10068",
                 plaintext.Length
-                    == headerSize + channelBlockSize * 2
-                && BitConverter.ToInt32(plaintext, 2) == 2
+                    == headerSize + channelBlockSize * 3
+                && BitConverter.ToInt32(plaintext, 2) == 3
                 && ReadFixedAscii(
                         plaintext,
                         freeDuelBlockOffset,

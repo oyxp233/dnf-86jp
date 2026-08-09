@@ -134,6 +134,18 @@ namespace DfoServer.Network.Handlers
 
             var (cid, aid) = ResolveOwner(session);
 
+            if (await TryRejectChannelRestrictedTeleportConsumableAsync(
+                    session,
+                    header,
+                    cid,
+                    listType,
+                    slotIndex,
+                    instanceValue,
+                    itemCode))
+            {
+                return;
+            }
+
             if (await TryHandleExpertJobRecipeLearning(
                     session, cid, listType, slotIndex, instanceValue, itemCode))
                 return;
@@ -226,6 +238,86 @@ namespace DfoServer.Network.Handlers
                 ? $" petSatiety key={result.PetCreatureKey} {result.PetSatietyBefore}->{result.PetSatietyAfter}"
                 : string.Empty;
             FileLogger.Log($"[{ProtocolName}] USE_STACKABLE: consumed 1x item 0x{itemCode:X8} from slot {slotIndex}, remaining={result.RemainingStackCount}{petSatietyLog}");
+        }
+
+        private async Task<bool>
+            TryRejectChannelRestrictedTeleportConsumableAsync(
+                EnhancedClientSession session,
+                GamePacketHeader header,
+                int characterId,
+                InventoryListType listType,
+                short slotIndex,
+                int instanceValue,
+                int expectedItemTemplateId)
+        {
+            if (!GameNetworkConfig.IsChannel100Listener(
+                    session.ListenerPort)
+                || !TryGetOwnedInventoryLease(
+                    session,
+                    characterId,
+                    out var lease))
+            {
+                return false;
+            }
+
+            var itemTemplateId = 0;
+            lock (lease.SyncRoot)
+            {
+                if (!InventoryContext.IsCurrentLease(
+                        lease,
+                        session.SessionId,
+                        characterId))
+                {
+                    return false;
+                }
+
+                var source = lease.Inventory.GetItem(
+                    listType,
+                    slotIndex);
+                if (source == null
+                    || source.ItemId <= 0
+                    || expectedItemTemplateId > 0
+                    && source.ItemId != expectedItemTemplateId)
+                {
+                    return false;
+                }
+
+                itemTemplateId = source.ItemId;
+            }
+
+            if (!TeleportConsumableDefinitionProvider.TryResolve(
+                    itemTemplateId,
+                    out var definition)
+                || GameChannelTeleportPolicy.CanUseConsumable(
+                    session.ListenerPort,
+                    definition))
+            {
+                return false;
+            }
+
+            FileLogger.Log(
+                $"[{ProtocolName}] USE_STACKABLE teleport rejected by " +
+                $"channel policy: cid={characterId} " +
+                $"listener={session.ListenerPort} " +
+                $"item=0x{itemTemplateId:X8} kind={definition.Kind} " +
+                $"targetTown={definition.TargetTownId?.ToString() ?? "dynamic"} " +
+                $"validDefinition={definition.IsValid}");
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                header.type,
+                UseStackableAckBuilder.BuildError(
+                    (byte)listType,
+                    instanceValue,
+                    itemTemplateId)));
+            if (_refresh != null)
+            {
+                await _refresh.SendUpdateItemList(
+                    session,
+                    listType,
+                    slotIndex);
+            }
+            await ChannelTownRestrictionSender.SendAsync(session);
+            return true;
         }
 
         private async Task<bool> TryHandleExpertJobRecipeLearning(

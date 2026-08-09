@@ -236,16 +236,11 @@ namespace DfoServer.Network
                 }
             }
 
-            if (result.Count == 0)
+            foreach (var channel in
+                     GameNetworkConfig.BuildGameChannels(includeFreeDuel))
             {
-                result.Add(CreateDefaultChannel(GameNetworkConfig.NormalChannelIndex));
-                channelIds.Add(GameNetworkConfig.NormalChannelIndex);
-            }
-
-            if (includeFreeDuel &&
-                channelIds.Add(GameNetworkConfig.FreeDuelChannelIndex))
-            {
-                result.Add(CreateDefaultChannel(GameNetworkConfig.FreeDuelChannelIndex));
+                if (channelIds.Add(channel.ChannelId))
+                    result.Add(CreateDefaultChannel(channel.ChannelId));
             }
 
             return result;

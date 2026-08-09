@@ -4,6 +4,7 @@ using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
+using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Dungeon;
 using DfoServer.Network.Handlers.Pets;
 using System;
@@ -285,12 +286,12 @@ namespace DfoServer.Network.Handlers
             GamePacketHeader header,
             byte[] body)
         {
-            _dungeonRejoin.ClearSession(session.SessionId);
-            session.PendingReturnSelectCharacterId = 0;
-            var selectedCharacterId = ResolveSelectedCharacterId(
+            var selectedCharacter = ResolveSelectedCharacter(
                 session,
-                body);
-            if (selectedCharacterId <= 0)
+                body,
+                out var selectedSlot);
+            if (selectedCharacter == null
+                || selectedCharacter.CharacterId <= 0)
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] SELECT_CHARACTER could not resolve " +
@@ -299,6 +300,36 @@ namespace DfoServer.Network.Handlers
                 session.Close();
                 return;
             }
+
+            if (GameChannelAdmissionPolicy.TryGetCharacterEntryRejection(
+                    session.ListenerPort,
+                    selectedCharacter.Level,
+                    out var admissionRejection))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] SELECT_CHARACTER rejected by channel " +
+                    $"admission: cid={selectedCharacter.CharacterId} " +
+                    $"level={selectedCharacter.Level} " +
+                    $"listener={session.ListenerPort} " +
+                    $"minimum={GameChannelAdmissionPolicy.Channel100MinimumCharacterLevel}");
+                await session.SendPacketAsync(
+                    GamePacketEnvelopeBuilder.Build(
+                        0x01,
+                        (ushort)CmdPacketType.SELECT_CHARACTER,
+                        SelectCharacterAckBodyBuilder.BuildRejected(
+                            admissionRejection.CommandErrorCode)));
+                await session.SendPacketAsync(
+                    GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        (ushort)NotiPacketType.SERVER_NOTICE_MESSAGE,
+                        ServerNoticeMessageBuilder.Build(
+                            admissionRejection.Message)));
+                return;
+            }
+
+            _dungeonRejoin.ClearSession(session.SessionId);
+            session.PendingReturnSelectCharacterId = 0;
+            var selectedCharacterId = selectedCharacter.CharacterId;
 
             var previousCharacterId = session.Player?.CharacterId ?? 0;
             if (previousCharacterId > 0)
@@ -332,10 +363,10 @@ namespace DfoServer.Network.Handlers
                     }
 
                     await _characterSelectHandler
-                        .Handle_ENUM_CMDPACKET_SELECT_CHARACTER(
+                        .HandleResolvedSelectCharacterAsync(
                             session,
-                            header,
-                            body);
+                            selectedCharacter,
+                            selectedSlot);
                     var prepared =
                         session.Player?.CharacterId == selectedCharacterId
                         && _sessionDirectory.TryGet(
@@ -474,9 +505,10 @@ namespace DfoServer.Network.Handlers
             session.Player.UserId = 0;
         }
 
-        private int ResolveSelectedCharacterId(
+        private CharacterRecord ResolveSelectedCharacter(
             EnhancedClientSession session,
-            byte[] body)
+            byte[] body,
+            out int selectedSlot)
         {
             var slot = body != null && body.Length >= 2
                 ? BitConverter.ToUInt16(body, 0)
@@ -499,7 +531,8 @@ namespace DfoServer.Network.Handlers
                 record = _characterRepository.GetById(
                     _selectCharacterDataSource.GetSeedCharacterId());
             }
-            return record?.CharacterId ?? 0;
+            selectedSlot = slot;
+            return record;
         }
 
         private async Task<bool> LeaveCurrentCharacterForSelectionAsync(

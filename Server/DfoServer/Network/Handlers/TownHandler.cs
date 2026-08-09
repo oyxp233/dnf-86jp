@@ -7,6 +7,7 @@ using DfoServer.Game.Session;
 using DfoServer.GameWorld;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
+using DfoServer.Network.Parsers.Town;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -120,6 +121,9 @@ namespace DfoServer.Network.Handlers
             {
                 if (session?.Player == null || session.Player.CharacterId <= 0)
                     return;
+                if (!GameChannelSpawnPolicy.ShouldPersistPosition(
+                        session.ListenerPort))
+                    return;
 
                 var now = DateTime.UtcNow;
                 if (!forceImmediate)
@@ -189,6 +193,19 @@ namespace DfoServer.Network.Handlers
             var gotoAreaId = body[1];
             var gotoPosX = BitConverter.ToInt16(body, 2);
             var gotoPosY = BitConverter.ToInt16(body, 4);
+
+            if (!GameChannelSpawnPolicy.CanEnterTown(
+                    session.ListenerPort,
+                    gotoTownId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] SET_USER_AREA rejected by channel policy: " +
+                    $"cid={session.Player.CharacterId} listener={session.ListenerPort} " +
+                    $"current={session.Player.CurTownId}:{session.Player.CurAreaId} " +
+                    $"target={gotoTownId}:{gotoAreaId}");
+                await ChannelTownRestrictionSender.SendAsync(session);
+                return;
+            }
 
             session.Player.CurTownId = gotoTownId;
             session.Player.CurAreaId = gotoAreaId;
@@ -338,52 +355,157 @@ namespace DfoServer.Network.Handlers
 
         public async Task Handle_ENUM_CMDPACKET_TELEPORT(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
-            if (body == null || body.Length < 8)
+            if (!ItemTeleportRequest.TryParse(body, out var request))
                 return;
-
-            var type = BitConverter.ToInt16(body, 0);
-            var itemCode = BitConverter.ToInt32(body, 2);
-            if (itemCode != 0x0027AC4E)
-                return;
-
-            var townId = body[7];
-            var ceraRoomInfo = Town.GetCeraRoomInfo(townId);
-            session.Player.CurTownId = ceraRoomInfo.Town;
-            session.Player.CurAreaId = ceraRoomInfo.Area;
-            session.Player.CurPosX = ceraRoomInfo.X;
-            session.Player.CurPosY = ceraRoomInfo.Y;
-            session.Player.CurDirection = 0;
-            session.Player.CurAreaState = 3;
 
             var (cid, _) = InventoryHandler.ResolveOwner(session);
-            int remainingCount = 0;
-            short targetSlot = -1;
-            if (InventoryContext.TryGetLease(cid, out var lease) && lease.IsOwnedBy(session.SessionId))
+            if (!InventoryContext.TryGetOwnedLease(
+                    session.SessionId,
+                    cid,
+                    out var lease))
             {
-                lock (lease.SyncRoot)
+                FileLogger.Log(
+                    $"[{ProtocolName}] TELEPORT rejected missing owned inventory: " +
+                    $"cid={cid} item=0x{request.ItemTemplateId:X8}");
+                return;
+            }
+
+            lock (lease.SyncRoot)
+            {
+                if (!InventoryContext.IsCurrentLease(
+                        lease,
+                        session.SessionId,
+                        cid)
+                    || lease.Inventory.CountMainItem(
+                        request.ItemTemplateId) < 1)
                 {
-                    if (lease.Inventory.TryConsumeMainItem(itemCode, 1, out var consumeResult) && consumeResult.Success)
-                    {
-                        targetSlot = consumeResult.SlotIndex;
-                        remainingCount = consumeResult.RemainingCount;
-                        FileLogger.Log($"[{ProtocolName}] TELEPORT: consumed 1x teleport item slot={targetSlot} remaining={remainingCount}");
-                    }
+                    FileLogger.Log(
+                        $"[{ProtocolName}] TELEPORT rejected item not owned: " +
+                        $"cid={cid} item=0x{request.ItemTemplateId:X8}");
+                    return;
+                }
+            }
+
+            if (!TeleportConsumableDefinitionProvider.TryResolve(
+                    request.ItemTemplateId,
+                    out var definition)
+                || !definition.IsValid
+                || definition.Kind
+                    != TeleportConsumableKind.TownSelection)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] TELEPORT rejected invalid item definition: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"item=0x{request.ItemTemplateId:X8}");
+                return;
+            }
+
+            if (!GameChannelSpawnPolicy.CanEnterTown(
+                    session.ListenerPort,
+                    request.TargetTownId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] TELEPORT rejected by channel policy: " +
+                    $"cid={session.Player.CharacterId} listener={session.ListenerPort} " +
+                    $"current={session.Player.CurTownId}:{session.Player.CurAreaId} " +
+                    $"targetTown={request.TargetTownId} " +
+                    $"item=0x{request.ItemTemplateId:X8}");
+                await ChannelTownRestrictionSender.SendAsync(session);
+                return;
+            }
+
+            CeraRoomInfo ceraRoomInfo;
+            try
+            {
+                ceraRoomInfo = Town.GetCeraRoomInfo(
+                    request.TargetTownId);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] TELEPORT rejected invalid target: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"targetTown={request.TargetTownId} error={ex.Message}");
+                return;
+            }
+            if (ceraRoomInfo.Town != request.TargetTownId)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] TELEPORT rejected target without gate: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"targetTown={request.TargetTownId}");
+                return;
+            }
+
+            InventoryMainItemConsumeResult consumeResult;
+            lock (lease.SyncRoot)
+            {
+                if (!InventoryContext.IsCurrentLease(
+                        lease,
+                        session.SessionId,
+                        cid)
+                    || !lease.Inventory.TryConsumeMainItem(
+                        request.ItemTemplateId,
+                        1,
+                        out consumeResult)
+                    || !consumeResult.Success)
+                {
+                    FileLogger.Log(
+                        $"[{ProtocolName}] TELEPORT rejected item not owned: " +
+                        $"cid={cid} item=0x{request.ItemTemplateId:X8}");
+                    return;
                 }
 
-                if (targetSlot < 0)
-                    remainingCount = lease.Inventory.CountMainItem(itemCode);
-            }
-            else
-            {
-                FileLogger.Log($"[{ProtocolName}] TELEPORT: online inventory missing cid={cid}");
+                session.Player.CurTownId = ceraRoomInfo.Town;
+                session.Player.CurAreaId = ceraRoomInfo.Area;
+                session.Player.CurPosX = ceraRoomInfo.X;
+                session.Player.CurPosY = ceraRoomInfo.Y;
+                session.Player.CurDirection = 0;
+                session.Player.CurAreaState = 3;
             }
 
+            FileLogger.Log(
+                $"[{ProtocolName}] TELEPORT: consumed item=" +
+                $"0x{request.ItemTemplateId:X8} slot={consumeResult.SlotIndex} " +
+                $"remaining={consumeResult.RemainingCount}");
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0018, TownAreaNotificationBuilder.BuildAreaUsers(TownAreaNotificationBuilder.CreateCurrentSnapshot(session.Player))));
-            if (targetSlot >= 0 && _refresh != null)
-                await _refresh.SendUpdateItemList(session, InventoryListType.Main, targetSlot);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x00ED, TeleportPacketBuilder.BuildTeleportResponse(type, itemCode)));
+            if (_refresh != null)
+                await _refresh.SendUpdateItemList(
+                    session,
+                    InventoryListType.Main,
+                    consumeResult.SlotIndex);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x00ED,
+                TeleportPacketBuilder.BuildTeleportResponse(
+                    request.Type,
+                    request.ItemTemplateId)));
 
             PersistPosition(session, forceImmediate: true, source: "teleport");
+        }
+
+        public async Task Handle_ENUM_CMDPACKET_PARTY_TELEPORT(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            if (GameChannelTeleportPolicy.CanUsePartyTeleport(
+                    session.ListenerPort))
+            {
+                return;
+            }
+
+            var parsed = PartyTeleportRequest.TryParse(
+                body,
+                out var request);
+            FileLogger.Log(
+                $"[{ProtocolName}] PARTY_TELEPORT rejected by channel policy: " +
+                $"cid={session?.Player?.CharacterId ?? 0} " +
+                $"listener={session?.ListenerPort ?? 0} " +
+                (parsed
+                    ? $"target={request.TownId}:{request.AreaId}"
+                    : "invalidBody=true"));
+            await ChannelTownRestrictionSender.SendAsync(session);
         }
 
         public async Task Handle_ENUM_CMDPACKET_GIVEUP_GAME(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -488,7 +610,10 @@ namespace DfoServer.Network.Handlers
             {
                 return false;
             }
-            ApplyTownReturnAnchor(session.Player, returnAnchor);
+            ApplyTownReturnAnchor(
+                session.Player,
+                returnAnchor,
+                session.ListenerPort);
             session.Player.UserState = 0x00;
             await SetUserAreaCoreAsync(
                 session,
@@ -507,7 +632,10 @@ namespace DfoServer.Network.Handlers
             if (!CanContinueTownProjection(session, projectionGuard))
                 return false;
 
-            ApplyTownReturnAnchor(session.Player, selection.ReturnAnchor);
+            ApplyTownReturnAnchor(
+                session.Player,
+                selection.ReturnAnchor,
+                session.ListenerPort);
             session.Player.UserState = 0x00;
             await SetUserAreaCoreAsync(
                 session,
@@ -532,8 +660,22 @@ namespace DfoServer.Network.Handlers
 
         private static void ApplyTownReturnAnchor(
             PlayerContext player,
-            DungeonTownReturnAnchor returnAnchor)
+            DungeonTownReturnAnchor returnAnchor,
+            int listenerGamePort)
         {
+            if (GameChannelSpawnPolicy.TryResolveTransientSpawn(
+                    listenerGamePort,
+                    out var transientSpawn))
+            {
+                player.CurTownId = transientSpawn.TownId;
+                player.CurAreaId = transientSpawn.AreaId;
+                player.CurPosX = transientSpawn.X;
+                player.CurPosY = transientSpawn.Y;
+                player.CurDirection = transientSpawn.Direction;
+                player.CurAreaState = transientSpawn.AreaState;
+                return;
+            }
+
             if (!returnAnchor.IsValid
                 && Town.TryGetDungeonGateReturnInfo(
                     player.CurTownId,

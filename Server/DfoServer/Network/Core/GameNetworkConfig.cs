@@ -7,11 +7,15 @@ namespace DfoServer.Network
     public static class GameNetworkConfig
     {
         public const int NormalChannelIndex = 11;
+        public const int Channel100Index = 100;
         public const int FreeDuelChannelIndex = 68;
         public const string ChannelName = "ch.11";
         public const int ChannelServerIndex = 1;
         public const int ChannelIndex = NormalChannelIndex;
         public const int NormalGamePort = 10011;
+        public const int NormalProxyGamePort = 10012;
+        public const int Channel100GamePort = 10161;
+        public const int Channel100ProxyGamePort = 10162;
         public const int FreeDuelGamePort = 10068;
         public const string FreeDuelListenerEnvironmentVariable =
             "DFO_FREE_DUEL_CHANNEL_LISTENER";
@@ -50,15 +54,26 @@ namespace DfoServer.Network
 
         internal static IReadOnlyList<GameChannelEndpoint> BuildGameChannels(
             bool includeFreeDuel)
+            => BuildGameChannels(includeFreeDuel, ProxyMode);
+
+        internal static IReadOnlyList<GameChannelEndpoint> BuildGameChannels(
+            bool includeFreeDuel,
+            bool proxyMode)
         {
             var normalListenerPort =
-                ProxyMode ? 10012 : NormalGamePort;
+                proxyMode ? NormalProxyGamePort : NormalGamePort;
+            var channel100ListenerPort =
+                proxyMode ? Channel100ProxyGamePort : Channel100GamePort;
             var channels = new List<GameChannelEndpoint>
             {
                 new GameChannelEndpoint(
                     NormalChannelIndex,
                     NormalGamePort,
-                    normalListenerPort)
+                    normalListenerPort),
+                new GameChannelEndpoint(
+                    Channel100Index,
+                    Channel100GamePort,
+                    channel100ListenerPort)
             };
 
             if (includeFreeDuel)
@@ -89,6 +104,10 @@ namespace DfoServer.Network
 
         public static bool IsFreeDuelListener(int listenerGamePort)
             => listenerGamePort == FreeDuelGamePort;
+
+        public static bool IsChannel100Listener(int listenerGamePort)
+            => listenerGamePort == Channel100GamePort
+               || listenerGamePort == Channel100ProxyGamePort;
 
         public static byte ResolveLoginEnvironment(int listenerGamePort)
             => IsFreeDuelListener(listenerGamePort)

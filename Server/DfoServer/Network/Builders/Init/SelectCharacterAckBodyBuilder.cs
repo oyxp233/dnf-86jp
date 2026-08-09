@@ -9,6 +9,11 @@ namespace DfoServer.Network.Builders
 {
     public static class SelectCharacterAckBodyBuilder
     {
+        public static byte[] BuildRejected(byte errorCode)
+        {
+            return CommonPacketBodyBuilder.BuildCmdError(errorCode);
+        }
+
         public static bool TryBuild(SelectCharacterDataSnapshot snapshot, out byte[] body)
         {
             var initSnap = snapshot.InitializationSnapshot;

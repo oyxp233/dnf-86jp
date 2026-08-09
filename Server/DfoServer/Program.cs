@@ -367,10 +367,12 @@ namespace DfoServer
 
             int channelPort = GameNetworkConfig.ProxyMode ? 7002 : 7001;
             var gameChannels = GameNetworkConfig.GetGameChannels();
-            var gamePort = GameNetworkConfig.FindGameChannel(
-                GameNetworkConfig.NormalChannelIndex).ListenerGamePort;
             var gameListenerPorts = gameChannels
                 .Select(channel => channel.ListenerGamePort)
+                .Distinct()
+                .ToArray();
+            var publicGamePorts = gameChannels
+                .Select(channel => channel.PublicGamePort)
                 .Distinct()
                 .ToArray();
 
@@ -401,10 +403,17 @@ namespace DfoServer
             Infrastructure.ClockService.Instance.Start();
 
             if (GameNetworkConfig.ProxyMode)
-                Console.WriteLine($"[ProxyMode] Server listening on {channelPort}(channel) / {gamePort}(game) – PvfProxy forwards 7001/10011 to these ports.");
+            {
+                Console.WriteLine(
+                    $"[ProxyMode] Server listening on {channelPort}(channel) / " +
+                    $"{string.Join("/", gameListenerPorts)}(game); " +
+                    "PvfProxy forwards the public channel/game ports.");
+            }
 
             Console.WriteLine("Multi-structure TCP server started!");
-            Console.WriteLine($"Advertised server IP: {GameNetworkConfig.ServerIp} (ports 7001 channel, 10011 game)");
+            Console.WriteLine(
+                $"Advertised server IP: {GameNetworkConfig.ServerIp} " +
+                $"(port 7001 channel, {string.Join("/", publicGamePorts)} game)");
             if (GameNetworkConfig.FreeDuelListenerEnabled)
             {
                 Console.WriteLine(

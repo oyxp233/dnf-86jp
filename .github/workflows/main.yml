@@ -60,14 +60,21 @@ jobs:
           echo "commit_hash=$($afterHash.Substring(0,7))" >> $env:GITHUB_OUTPUT
           
           # 对比 Merge 前后的 Hash，判断上游是否有实际更新
-          if ($beforeHash -ne $afterHash) {
+          $hasUpdates = $beforeHash -ne $afterHash
+          
+          # 新增优化1：如果是手动触发，强制标记为有更新以执行后续编译
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+              echo "Manual trigger detected. Forcing build and release."
+              $hasUpdates = $true
+          }
+
+          if ($hasUpdates) {
               echo "has_new_commits=true" >> $env:GITHUB_OUTPUT
               
               # Merge 模式使用正常推送，不需要 --force
               git push origin $upstreamBranch
               git push origin --tags
           } else {
-              # 即使上游没有更新，也强制触发后续的构建和 Release
               echo "has_new_commits=false" >> $env:GITHUB_OUTPUT
           }
 
@@ -85,6 +92,7 @@ jobs:
           dotnet publish Server\DfoServer\DfoServer.csproj ^
             -c Release ^
             -r win-x64 ^
+            --self-contained false ^
             -p:UseSystemResourceKeys=true ^
             -p:InvariantGlobalization=true ^
             -p:StripSymbols=true ^

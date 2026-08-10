@@ -38,6 +38,7 @@ namespace DfoServer
             ("--selftest-dungeon-rejoin-protocol", SelfTests.DungeonRejoinProtocolSelfTest.Run),
             ("--selftest-dungeon-encounter-directive", SelfTests.DungeonEncounterDirectiveSelfTest.Run),
             ("--selftest-dungeon-reward-policy", SelfTests.DungeonRewardPolicySelfTest.Run),
+            ("--selftest-dungeon-experience", SelfTests.DungeonExperienceSelfTest.Run),
             ("--selftest-impossible-dungeon-drop", SelfTests.ImpossibleDungeonDropSelfTest.Run),
             ("--selftest-dungeon-difficulty-permission", SelfTests.DungeonDifficultyPermissionSelfTest.Run),
             ("--selftest-scripted-fatal-endpoint", SelfTests.ScriptedFatalEndpointSelfTest.Run),
@@ -331,6 +332,7 @@ namespace DfoServer
                 FileLogger.Log(
                     $"[Startup] ITEM_METADATA_WARMUP totalMs={itemMetadataWarmupTimer.Elapsed.TotalMilliseconds:F3}");
                 Game.Dungeon.ClearRewardGenerator.WarmUp();
+                GameWorld.DungeonExperienceDefinitionCatalog.WarmUp();
                 Game.Dungeon.PassiveObjectDropPlanningService.WarmUp();
                 Game.Inventory.EquipmentRegenerationCandidateCatalog.Warmup();
                 GameWorld.IndependentDropDefinitionCatalog.WarmUp();

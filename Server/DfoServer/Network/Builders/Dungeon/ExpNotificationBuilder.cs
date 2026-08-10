@@ -21,7 +21,8 @@ namespace DfoServer.Network.Builders
             uint seriaBlessingBonusExp = 0, uint growthContractBonusExp = 0,
             uint fatigueBurnBonusExp = 0, uint internetCafeBonusExp = 0,
             uint eliteMonsterKillBonusExp = 0,
-            uint growthCapsuleExp = 0)
+            uint growthCapsuleExp = 0,
+            uint channelBonusExp = 0)
         {
             var w = new GamePacketWriter();
 
@@ -58,7 +59,7 @@ namespace DfoServer.Network.Builders
             w.WriteUInt32(honorLevel?.HonorExp ?? 0);   // +0x43 [u32] 当前荣誉段 EXP，由地址 0x0056EA20 应用
             w.WriteUInt32(0);                           // +0x47 [u32] 极速成长 Buff EXP，文本 0x11CB6
             w.WriteUInt32(0);                           // +0x4B [u32] 未知，客户端解析后未继续使用
-            w.WriteUInt32(0);                           // +0x4F [u32] 频道奖励 EXP，文本 0xA5F6
+            w.WriteUInt32(channelBonusExp);             // +0x4F [u32] 频道奖励 EXP，文本 0xA5F6
             w.WriteUInt32(0);                           // +0x53 [u32] 赛丽亚的欢迎 EXP，文本 0xA5F7
 
             // N=0 时客户端在 +0x57 结束读取，即实际消费 87B。项目继续保留以下 8B，

@@ -45,8 +45,20 @@ namespace DfoServer.Network.Handlers
             SeparateUpgradeResult result;
             bool ok;
             lock (lease.SyncRoot)
-                ok = InventorySeparateUpgradeService.TryUpgrade(
-                    lease.Inventory, request.ToCommand(), table, metadata, out result);
+            {
+                var ticketItem = lease.Inventory.GetItem(InventoryListType.Main, request.MaterialSlotIndex);
+                if (ticketItem != null
+                    && SeparateUpgradeTicketDefinition.TryLoad(ticketItem.ItemId, out var ticket))
+                {
+                    ok = InventorySeparateUpgradeService.TryApplyTicket(
+                        lease.Inventory, request.ToCommand(), ticket, table, metadata, out result);
+                }
+                else
+                {
+                    ok = InventorySeparateUpgradeService.TryUpgrade(
+                        lease.Inventory, request.ToCommand(), table, metadata, out result);
+                }
+            }
 
             if (!ok)
             {

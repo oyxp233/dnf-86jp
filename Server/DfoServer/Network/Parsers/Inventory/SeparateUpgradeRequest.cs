@@ -27,9 +27,11 @@ namespace DfoServer.Network.Parsers.Inventory
                 return false;
 
             var nameLength = BitConverter.ToInt32(body, 9);
+            // The client uses 0 for the ordinary flow and 1/2 for advanced
+            // ticket confirmation variants. All packets share this layout.
             if (nameLength <= 0 || nameLength > body.Length - 14
                 || 13 + nameLength + 1 != body.Length
-                || body[body.Length - 1] != 0)
+                || body[body.Length - 1] > 2)
                 return false;
 
             request = new SeparateUpgradeRequest

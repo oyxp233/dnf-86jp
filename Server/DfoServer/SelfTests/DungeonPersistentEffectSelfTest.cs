@@ -14,6 +14,7 @@ namespace DfoServer.SelfTests
         private const int AtomicCharacterId = 979202;
         private const int LuckyStarCharacterId = 979203;
         private const int ConflictCharacterId = 979204;
+        private const int ScoreAdjustmentCharacterId = 979205;
 
         private static readonly JsonSerializerOptions JsonOptions =
             new JsonSerializerOptions
@@ -49,6 +50,7 @@ namespace DfoServer.SelfTests
                 TestRepositoryTransitions(connectionString);
                 TestForeignLeaseRecovery(connectionString);
                 TestAtomicRollbackAndReplay(connectionString);
+                TestScoreAdjustmentIdempotency(connectionString);
                 TestLuckyStarIdempotency(connectionString);
                 TestExpectedValueConflict(connectionString);
                 TestUnknownPayloadsFailClosed(connectionString);
@@ -312,6 +314,48 @@ END;");
                         $"WHERE account_id = {AccountId};") == 1);
         }
 
+        private static void TestScoreAdjustmentIdempotency(
+            string connectionString)
+        {
+            var service = new DungeonPersistentEffectApplicationService(
+                connectionString,
+                new DungeonPersistentEffectOutbox(
+                    connectionString,
+                    Guid.NewGuid()));
+            var effectId = NewEffectId(
+                DungeonPersistentEffectKinds.SettlementScoreExperienceAdjustment,
+                8);
+            var first = service.TryApplySettlementScoreExperienceAdjustment(
+                effectId,
+                ScoreAdjustmentCharacterId,
+                AccountId,
+                previousLevel: 50,
+                previousExp: 0,
+                rawGain: 25,
+                out var firstResult,
+                out var firstError);
+            var replay = service.TryApplySettlementScoreExperienceAdjustment(
+                effectId,
+                ScoreAdjustmentCharacterId,
+                AccountId,
+                previousLevel: 50,
+                previousExp: 0,
+                rawGain: 25,
+                out var replayResult,
+                out var replayError);
+            Check(
+                "late score experience adjustment is durable and idempotent",
+                first
+                    && replay
+                    && firstError == null
+                    && replayError == null
+                    && firstResult.NewExp == 25
+                    && replayResult.NewExp == 25
+                    && ReadCharacterExp(
+                        connectionString,
+                        ScoreAdjustmentCharacterId) == 25);
+        }
+
         private static void TestExpectedValueConflict(string connectionString)
         {
             var effectId = NewEffectId(
@@ -438,9 +482,11 @@ VALUES
     (@recoveryId, @accountId, 'EffectRecovery', 0, 0, 50, 0),
     (@atomicId, @accountId, 'EffectAtomic', 0, 0, 50, 0),
     (@luckyId, @accountId, 'EffectLucky', 0, 0, 50, 0),
-    (@conflictId, @accountId, 'EffectConflict', 0, 0, 50, 0);
+    (@conflictId, @accountId, 'EffectConflict', 0, 0, 50, 0),
+    (@scoreAdjustmentId, @accountId, 'EffectScoreAdjustment', 0, 0, 50, 0);
 INSERT INTO character_subtype1_fields(character_id)
-VALUES(@recoveryId), (@atomicId), (@luckyId), (@conflictId);";
+VALUES(@recoveryId), (@atomicId), (@luckyId), (@conflictId),
+      (@scoreAdjustmentId);";
                     command.Parameters.AddWithValue("@accountId", AccountId);
                     command.Parameters.AddWithValue(
                         "@recoveryId",
@@ -454,6 +500,9 @@ VALUES(@recoveryId), (@atomicId), (@luckyId), (@conflictId);";
                     command.Parameters.AddWithValue(
                         "@conflictId",
                         ConflictCharacterId);
+                    command.Parameters.AddWithValue(
+                        "@scoreAdjustmentId",
+                        ScoreAdjustmentCharacterId);
                     command.ExecuteNonQuery();
                 }
             }

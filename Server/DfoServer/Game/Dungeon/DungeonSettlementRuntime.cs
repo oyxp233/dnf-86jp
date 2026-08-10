@@ -14,12 +14,14 @@ namespace DfoServer.Game.Dungeon
         internal bool ShouldScheduleCardRewardFlow;
         internal BloodAltar.BloodAltarParticipantSettlementRuntime BloodAltar;
 
-        // Reward rank is server-owned. Presentation rank may be copied from a
-        // validated SET_PLAY_RESULT field, but never feeds reward generation.
+        // The current protocol supplies a bounded, first-write-wins rank via
+        // SET_PLAY_RESULT. It can adjust score EXP; independent server-side
+        // score validation remains a separate authority boundary.
         internal byte ClientRankPoint;
         internal int PresentationRankPoint;
         internal byte PresentationRankGrade;
         internal int PresentationRankBonusIndex;
+        internal bool AuthoritativeRankCaptured;
         internal int TimeBonusPoint;
         internal int RankPoint;
         internal byte RankGrade;
@@ -27,6 +29,10 @@ namespace DfoServer.Game.Dungeon
 
         internal uint ClearBaseExp;
         internal uint ScoreBonusExp;
+        internal uint PartyClearBreakdownExp;
+        internal uint AvatarBonusExp;
+        internal uint CreatureBonusExp;
+        internal uint ChannelBonusExp;
         internal uint GrowthContractBonusExp;
         internal uint BlackDiamondBonusExp;
         internal uint AdventureGroupBonusExp;
@@ -35,6 +41,7 @@ namespace DfoServer.Game.Dungeon
         internal byte PreviousLevel;
         internal uint PreviousExp;
         internal ExperienceGrantResult ExperienceGrant;
+        internal ExperienceGrantResult ScoreAdjustmentExperienceGrant;
 
         internal int DungeonLevel;
         internal int PaidCardCost;
@@ -61,6 +68,7 @@ namespace DfoServer.Game.Dungeon
         internal uint SuperChampionTotalExp;
         internal uint NamedMonsterTotalExp;
         internal uint MonsterGrowthContractBonusExp;
+        internal uint MonsterChannelBonusExp;
         internal int ClearTimeMilliseconds;
     }
 }

@@ -350,7 +350,7 @@ namespace DfoServer.Game.DeathTower
             if (clearedFloorCount <= 0 || floorWeight <= 0)
                 return 0;
 
-            var value = MonsterRewardTable.GetBaseExp(characterLevel)
+            var value = MonsterRewardTable.GetMobReward(characterLevel)
                 * (double)clearedFloorCount
                 * floorWeight;
             if (value <= 0 || double.IsNaN(value))

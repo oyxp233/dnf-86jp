@@ -234,6 +234,7 @@ namespace PvfLib
         public UpgradeLimitCubeInfo UpgradeLimitCube { get; set; }
         public EquipmentUpgradeTicketInfo EquipmentReinforcementTicket { get; set; }
         public EquipmentUpgradeTicketInfo EquipmentAmplifyReinforcementTicket { get; set; }
+        public EquipmentUpgradeTicketInfo EquipmentSeparateReinforcementTicket { get; set; }
         public EnchantRandomUpgradeInfo EnchantRandomUpgrade { get; set; }
         public List<AmplificationRandomValueEntry> AmplificationRandomValues { get; set; } = new List<AmplificationRandomValueEntry>();
         public List<int> CheckUsableItemLevels { get; set; } = new List<int>();
@@ -380,6 +381,7 @@ namespace PvfLib
                     case "upgrade limit cube info": stk.UpgradeLimitCube = ParseUpgradeLimitCubeInfo(node, content); break;
                     case "equipment reinforcement ticket": stk.EquipmentReinforcementTicket = ParseUpgradeTicket(node, content); break;
                     case "equipment amplify reinforcement ticket": stk.EquipmentAmplifyReinforcementTicket = ParseUpgradeTicket(node, content); break;
+                    case "equipment separate reinforcement ticket": stk.EquipmentSeparateReinforcementTicket = ParseUpgradeTicket(node, content); break;
                     case "enchant random": stk.EnchantRandomUpgrade = ParseEnchantRandomUpgrade(node, content); break;
                     case "amplification random value": stk.AmplificationRandomValues = ParseAmplificationRandomValues(node, content); break;
                     case "check usable itemlevel": stk.CheckUsableItemLevels = ParseIntList(node, content); break;

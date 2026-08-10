@@ -19,7 +19,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             int dungeonId,
             byte difficulty,
             DungeonInstance sharedInstance = null,
-            DungeonInstanceRegistry instanceRegistry = null)
+            DungeonInstanceRegistry instanceRegistry = null,
+            DungeonParticipantExperienceBonusSnapshot?
+                experienceBonusSnapshot = null)
         {
             var towerItemIds = CaptureTowerItemIds(session);
             var oldRun = session?.Player?.CurrentRun;
@@ -51,6 +53,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                     DungeonIdentityGenerator.NextRunId(),
                     generation,
                     DungeonRunState.Created);
+                if (!newRun.TryFreezeExperienceBonusSnapshot(
+                        experienceBonusSnapshot
+                            ?? DungeonParticipantExperienceBonusSnapshot.None))
+                {
+                    throw new InvalidOperationException(
+                        "Participant experience bonus snapshot was already frozen.");
+                }
                 newRun.ChronicleDropJobGroup =
                     GameWorld.IndependentDropDefinitionCatalog
                         .ResolveChronicleDropJobGroup(
@@ -98,7 +107,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             int dungeonId,
             Game.DeathTower.DeathTowerSession tower,
             byte difficulty = 0,
-            DungeonInstanceRegistry instanceRegistry = null)
+            DungeonInstanceRegistry instanceRegistry = null,
+            DungeonParticipantExperienceBonusSnapshot?
+                experienceBonusSnapshot = null)
         {
             var towerItemIds = CaptureTowerItemIds(session);
             var oldRun = session?.Player?.CurrentRun;
@@ -126,6 +137,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                     DungeonIdentityGenerator.NextRunId(),
                     session.Player.NextDungeonRunGeneration(),
                     DungeonRunState.Active);
+                if (!newRun.TryFreezeExperienceBonusSnapshot(
+                        experienceBonusSnapshot
+                            ?? DungeonParticipantExperienceBonusSnapshot.None))
+                {
+                    throw new InvalidOperationException(
+                        "Participant experience bonus snapshot was already frozen.");
+                }
                 newRun.ChronicleDropJobGroup =
                     GameWorld.IndependentDropDefinitionCatalog
                         .ResolveChronicleDropJobGroup(
@@ -156,7 +174,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 (short)dungeonId,
                 difficulty,
                 GameWorld.DungeonRewardPolicyData.Resolve(dungeonId),
-                GameWorld.DungeonDropDefinitionCatalog.Resolve(dungeonId));
+                GameWorld.DungeonDropDefinitionCatalog.Resolve(dungeonId),
+                GameWorld.DungeonExperienceDefinitionCatalog.Resolve(dungeonId));
 
         // The only public ending entry. Every caller supplies its semantic
         // reason and, when it originates from a delayed/client continuation,

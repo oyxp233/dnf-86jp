@@ -1,8 +1,11 @@
 using DfoServer.Game.Inventory;
 using DfoServer.Game.ItemUpgrade;
+using DfoServer.GameWorld;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Parsers.Inventory;
+using PvfLib;
 using System;
+using System.IO;
 
 namespace DfoServer.SelfTests
 {
@@ -10,6 +13,7 @@ namespace DfoServer.SelfTests
     {
         private const int TargetItemId = 101010653;
         private const int MaterialItemId = 3326;
+        private const int TicketItemId = 10008363;
         private const short TargetSlot = 11;
         private const short MaterialSlot = 134;
         private static int _failures;
@@ -21,7 +25,9 @@ namespace DfoServer.SelfTests
             TestProtocol();
             var table = TestPvfParsing();
             TestTransactions(table);
+            TestTicketTransactions();
             TestCurrentPvf();
+            TestCurrentPvfTickets();
             Console.WriteLine(_failures == 0
                 ? "SeparateUpgradeSelfTest OK"
                 : $"SeparateUpgradeSelfTest FAIL: {_failures}");
@@ -207,6 +213,100 @@ namespace DfoServer.SelfTests
                 "PVF grade 91 material sequence matches client display");
         }
 
+        private static void TestTicketTransactions()
+        {
+            var stackable = StackableItemFile.Parse(@"
+[stackable type]
+`[etc]` 1
+[equipment separate reinforcement ticket]
+7 100
+`fixed` -1
+[need material]
+10008362 12
+");
+            Check(SeparateUpgradeTicketDefinition.TryParse(TicketItemId, stackable, out var ticket)
+                && ticket.ItemTemplateId == TicketItemId
+                && ticket.TargetLevel == 7
+                && ticket.SuccessWeight == 10000
+                && ticket.IsFixed,
+                "fixed separate-upgrade ticket PVF definition");
+
+            var inventory = CreateInventory();
+            inventory.SetItem(InventoryListType.Main, MaterialSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = TicketItemId,
+                Count = 2,
+            });
+            var target = inventory.GetItem(InventoryListType.Main, TargetSlot).Copy();
+            target.GenuineUpgrade = 8;
+            inventory.SetItem(InventoryListType.Main, TargetSlot, target);
+            Check(InventorySeparateUpgradeService.TryApplyTicket(
+                    inventory, CreateCommand(), ticket, CreateTicketTable(), ResolveMetadata(), () => 0, out var success)
+                && success.UpgradeSucceeded
+                && success.OldLevel == 8 && success.NewLevel == 7
+                && success.MaterialCost == 1 && success.MaterialRemainingCount == 1
+                && inventory.GetItem(InventoryListType.Main, TargetSlot).GenuineUpgrade == 7
+                && inventory.GetItem(InventoryListType.Main, MaterialSlot).Count == 1,
+                "fixed ticket overwrites higher forging and consumes only one ticket");
+
+            inventory = CreateInventory();
+            inventory.SetItem(InventoryListType.Main, MaterialSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = TicketItemId + 1,
+                Count = 1,
+            });
+            Check(!InventorySeparateUpgradeService.TryApplyTicket(
+                    inventory, CreateCommand(), ticket, CreateTicketTable(), ResolveMetadata(), () => 0, out var forgedSlot)
+                && forgedSlot.ErrorCode == SeparateUpgradeResult.ErrorInvalidMaterial
+                && inventory.GetItem(InventoryListType.Main, TargetSlot).GenuineUpgrade == 0,
+                "ticket service rejects a substituted slot item");
+
+            var additionalStackable = StackableItemFile.Parse(@"
+[equipment separate reinforcement ticket]
+1 100
+`additional` -1
+");
+            Check(SeparateUpgradeTicketDefinition.TryParse(TicketItemId, additionalStackable, out var additional)
+                && additional.IsAdditional && !additional.IsFixed,
+                "additional separate-upgrade ticket PVF definition");
+            inventory = CreateInventory();
+            inventory.SetItem(InventoryListType.Main, MaterialSlot, new ItemCore
+            {
+                ItemKind = ItemCore.KindConsumable,
+                ItemId = TicketItemId,
+                Count = 2,
+            });
+            target = inventory.GetItem(InventoryListType.Main, TargetSlot).Copy();
+            target.GenuineUpgrade = 7;
+            inventory.SetItem(InventoryListType.Main, TargetSlot, target);
+            Check(InventorySeparateUpgradeService.TryApplyTicket(
+                    inventory, CreateCommand(), additional, CreateTicketTable(), ResolveMetadata(), () => 0, out var added)
+                && added.NewLevel == 8
+                && inventory.GetItem(InventoryListType.Main, TargetSlot).GenuineUpgrade == 8,
+                "additional ticket increases forging up to global maximum");
+            Check(!InventorySeparateUpgradeService.TryApplyTicket(
+                    inventory, CreateCommand(), additional, CreateTicketTable(), ResolveMetadata(), () => 0, out var capped)
+                && capped.ErrorCode == SeparateUpgradeResult.ErrorMaxLevel
+                && inventory.GetItem(InventoryListType.Main, MaterialSlot).Count == 1,
+                "additional ticket rejects maximum-level weapon without consuming");
+        }
+
+        private static SeparateUpgradeTable CreateTicketTable()
+            => SeparateUpgradeTable.Parse(@"
+[table]
+1 1 10000 1
+[separate upgrade max]
+8
+[level]
+8
+[item weights by grade]
+91 3326 1
+[item weights by rarity]
+1 1 1 1 1 1 1
+");
+
         private static void TestCurrentPvf()
         {
             try
@@ -226,6 +326,47 @@ namespace DfoServer.SelfTests
             catch (Exception ex)
             {
                 Check(false, $"current Script.pvf: {ex.Message}");
+            }
+        }
+
+        private static void TestCurrentPvfTickets()
+        {
+            try
+            {
+                var list = LstFile.Parse(PvfArchiveAccessor.ReadText("stackable/stackable.lst"));
+                var count = 0;
+                var allSupported = true;
+                foreach (var entry in list.Entries)
+                {
+                    var text = PvfArchiveAccessor.ReadText(Path.Combine("stackable", entry.FilePath));
+                    if (text.IndexOf("[equipment separate reinforcement ticket]", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
+
+                    count++;
+                    var stackable = StackableItemFile.Parse(text);
+                    var source = stackable.EquipmentSeparateReinforcementTicket;
+                    var supported = SeparateUpgradeTicketDefinition.TryParse(entry.Id, stackable, out var definition);
+                    allSupported &= supported;
+                    if (!supported)
+                    {
+                        Console.WriteLine(
+                            $"  [INFO] unsupported separate ticket item={entry.Id} path={entry.FilePath} " +
+                            $"level={source?.TargetLevel} rate={source?.SuccessRatePercent} " +
+                            $"mode={source?.ApplyMode} apply={source?.ApplyValue}");
+                    }
+                    if (supported)
+                    {
+                        allSupported &= definition.TargetLevel == source.TargetLevel
+                            && definition.SuccessWeight == source.SuccessRatePercent * 100;
+                    }
+                }
+
+                Check(count > 0 && allSupported,
+                    $"current PVF separate-upgrade tickets supported count={count}");
+            }
+            catch (Exception ex)
+            {
+                Check(false, $"current PVF separate-upgrade tickets: {ex.Message}");
             }
         }
 

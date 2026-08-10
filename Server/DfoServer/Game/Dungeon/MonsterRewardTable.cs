@@ -6,7 +6,7 @@ namespace DfoServer.Game.Dungeon
 {
     public static class MonsterRewardTable
     {
-        private static readonly int[] BaseExp = new int[]
+        private static readonly int[] MobRewardByLevel = new int[]
         {
             30,   40,   50,   60,   70,   80,   90,  100,  110,  120,
            130,  140,  150,  160,  170,  185,  201,  218,  235,  253,
@@ -21,70 +21,14 @@ namespace DfoServer.Game.Dungeon
         };
 
         private static readonly object _lock = new object();
-        private static float[] _difficultyExpRate;
-        private static float[] _monsterExpBonusRate;
         private static float[] _clearRankExpBonusRate;
         private static int[] _rankGrades;
 
-        public static int GetBaseExp(int monsterLevel)
+        public static int GetMobReward(int level)
         {
-            if (monsterLevel < 1 || monsterLevel > BaseExp.Length) return 0;
-            return BaseExp[monsterLevel - 1];
-        }
-
-        public static float GetDifficultyExpRate(int difficulty)
-        {
-            EnsureDifficultyRatesLoaded();
-            if (difficulty < 0 || difficulty >= _difficultyExpRate.Length) return 1.0f;
-            return _difficultyExpRate[difficulty];
-        }
-
-        public static int CalcExp(int monsterLevel, float expWeight, int difficulty = 0)
-        {
-            return CalcExp(monsterLevel, expWeight, difficulty, 0, false);
-        }
-
-        public static int CalcExp(int monsterLevel, float expWeight, int difficulty, int monsterType, bool isNamedMonster)
-        {
-            var baseExp = CalcBaseExp(monsterLevel, expWeight);
-            var diffRate = GetDifficultyExpRate(difficulty);
-            var typeRate = GetMonsterExpBonusRate(monsterType);
-            if (isNamedMonster)
-                typeRate *= 3.0f;
-            return (int)(baseExp * diffRate * typeRate);
-        }
-
-        // 角色自身等级 vs 怪物等级差 的经验缩放率。照抄 df_game_r CDataManager::BaseExpPenalty @0x08360914
-        // (调用点 CParty::kill_monster @0x085A3538 = BaseExpPenalty(charLevel, monsterLevel), diff = monsterLevel - charLevel)。
-        // 语义: 自己远高于怪(diff≤-7)→5% 防越级刷小号; 比怪低 1~3 级(diff+1..+3)→1.12 甜点加成; 比怪低 10 级以上→5%。
-        // 用途: 组队副本每个成员用【各自等级】各算一次 → 不同等级同副本得到不同经验(修 A/B 同额)。
-        public static float BaseExpPenalty(int charLevel, int monsterLevel)
-        {
-            int diff = monsterLevel - charLevel;
-            if (diff <= -7) return 0.05f;
-            switch (diff)
-            {
-                case -6: return 0.20f;
-                case -5: return 0.50f;
-                case -4: return 0.75f;
-                case -3: case -2: case -1: case 0: return 1.00f;
-                case 1: case 2: case 3: return 1.12f;
-                case 4: case 5: return 1.00f;
-                case 6: return 0.75f;
-                case 7: return 0.70f;
-                case 8: return 0.60f;
-                case 9: return 0.50f;
-                default: return 0.05f; // diff >= 10
-            }
-        }
-
-        public static float GetMonsterExpBonusRate(int monsterType)
-        {
-            EnsureMonsterExpBonusRatesLoaded();
-            if (_monsterExpBonusRate.Length == 0) return 1.0f;
-            if (monsterType < 0) return _monsterExpBonusRate[0];
-            if (monsterType >= _monsterExpBonusRate.Length) return _monsterExpBonusRate[0];
-            return _monsterExpBonusRate[monsterType];
+            if (level < 1 || level > MobRewardByLevel.Length)
+                return 0;
+            return MobRewardByLevel[level - 1];
         }
 
         public static int GetClearRankBonusIndex(int clearScore)
@@ -117,32 +61,6 @@ namespace DfoServer.Game.Dungeon
             return _clearRankExpBonusRate[rankBonusIndex];
         }
 
-        public static int CalcBaseExp(int monsterLevel, float expWeight)
-        {
-            var baseExp = GetBaseExp(monsterLevel);
-            return (int)(baseExp * expWeight);
-        }
-
-        private static void EnsureDifficultyRatesLoaded()
-        {
-            if (_difficultyExpRate != null) return;
-            lock (_lock)
-            {
-                if (_difficultyExpRate != null) return;
-                _difficultyExpRate = ParseDifficultyExpRates();
-            }
-        }
-
-        private static void EnsureMonsterExpBonusRatesLoaded()
-        {
-            if (_monsterExpBonusRate != null) return;
-            lock (_lock)
-            {
-                if (_monsterExpBonusRate != null) return;
-                _monsterExpBonusRate = ParseFloatRates("[monster exp bonusrate]", new float[] { 1f });
-            }
-        }
-
         private static void EnsureClearRankExpBonusRatesLoaded()
         {
             if (_clearRankExpBonusRate != null) return;
@@ -162,11 +80,6 @@ namespace DfoServer.Game.Dungeon
                 _rankGrades = ParseIntValues("Etc/RankSystemInfo.etc", "[rank grade]", new int[] { 99, 90, 80, 60, 50, 30, 20, 10 });
                 return _rankGrades;
             }
-        }
-
-        private static float[] ParseDifficultyExpRates()
-        {
-            return ParseFloatRates("[dungeon difficulty exp bonusrate]", new float[] { 1f, 1f, 1f, 1f, 1f });
         }
 
         private static float[] ParseFloatRates(string tag, float[] fallback)

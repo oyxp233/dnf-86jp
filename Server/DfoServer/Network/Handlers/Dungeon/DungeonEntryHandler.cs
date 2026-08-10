@@ -298,6 +298,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
+            var experienceBonusPlan =
+                DungeonEntryExperienceBonusPlan.Capture(
+                    session,
+                    entryParty,
+                    _svc.Sessions,
+                    entryPartyMemberCount,
+                    req.DungeonId);
+
             // 塔类副本分流: dungeonKind==1 走专属流程(NOTI 142+143, 非普通副本的 START_MAP)
             if (_svc.DeathTower.TryCreateSession(req.DungeonId, out var tower))
             {
@@ -316,7 +324,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     req.DungeonId,
                     tower,
                     req.Difficulty,
-                    _svc.InstanceRegistry);
+                    _svc.InstanceRegistry,
+                    experienceBonusPlan.ForParticipant(session));
                 var towerRun = session.Player.CurrentRun;
                 if (towerRun == null || !ReferenceEquals(towerRun.Tower, tower))
                     return;
@@ -342,7 +351,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 session,
                 req.DungeonId,
                 req.Difficulty,
-                instanceRegistry: _svc.InstanceRegistry);
+                instanceRegistry: _svc.InstanceRegistry,
+                experienceBonusSnapshot:
+                    experienceBonusPlan.ForParticipant(session));
             var run = session.Player.CurrentRun;
             var runIdentity = run.CaptureIdentity();
             run.HellMode = req.HellPartyRequestFlag != 0 && DungeonData.IsHellDungeon(req.DungeonId);
@@ -440,7 +451,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
 
             // ★组队副本联机: 队长进本时把整队队员也驱动进【同一实例】。⚠️待真机验证(见 DFO_PARTY_DUNGEON_COOP)。
-            await TryFanOutDungeonEntryToPartyAsync(session, header, req, bossPos, (byte)selection.Index);
+            await TryFanOutDungeonEntryToPartyAsync(
+                session,
+                header,
+                req,
+                bossPos,
+                (byte)selection.Index,
+                experienceBonusPlan);
         }
 
         internal static byte[] BuildMercenaryContentErrorBody()
@@ -713,7 +730,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             GamePacketHeader header,
             Network.Parsers.Dungeon.SelectDungeonRequest req,
             int[] bossPos,
-            byte mazeModeFlag)
+            byte mazeModeFlag,
+            DungeonEntryExperienceBonusPlan experienceBonusPlan)
         {
             if (System.Environment.GetEnvironmentVariable("DFO_PARTY_DUNGEON_COOP") == "0") return;
             var pm = _svc.PartyManager;
@@ -772,7 +790,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         req.DungeonId,
                         req.Difficulty,
                         lr.Instance,
-                        _svc.InstanceRegistry);
+                        _svc.InstanceRegistry,
+                        experienceBonusPlan?.ForParticipant(bs));
                     var br = bs.Player.CurrentRun;
                     if (br == null)
                         continue;

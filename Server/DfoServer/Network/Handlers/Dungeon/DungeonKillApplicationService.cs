@@ -674,25 +674,42 @@ namespace DfoServer.Network.Handlers.Dungeon
             var isNamed = !isBoss
                 && DungeonData.IsNamedMonster(run.DungeonId, monster.Code);
             var isSuperChampion = monster.Type == 2 && !isNamed;
-            var weight = DungeonData.GetExperienceWeight(run.DungeonId);
-            var gainedExp = allowsExperience
-                ? (uint)MonsterRewardTable.CalcExp(
-                    monster.Level,
-                    weight,
-                    run.Difficulty,
-                    rewardMonsterType,
-                    isNamed)
-                : 0;
-            var playerRate = allowsExperience
-                ? MonsterRewardTable.BaseExpPenalty(session.Player.Level, monster.Level)
-                : 0;
-            var scaledExp = (uint)(gainedExp * playerRate);
+            var partyMemberCount = Math.Max(
+                1,
+                run.Instance?.Selection?.PartyMemberCount
+                    ?? run.EntryPartyMemberCount);
+            var experienceContext = new DungeonMonsterExperienceContext(
+                session.Player.Level,
+                monster.Level,
+                run.Difficulty,
+                rewardMonsterType,
+                isNamed,
+                partyMemberCount);
+            var baseExperience = allowsExperience
+                ? run.ExperienceDefinition?.UsesStandardFormula == true
+                    ? DungeonExperienceCalculator.CalculateStandardMonster(
+                        run.ExperienceDefinition,
+                        experienceContext)
+                    : DungeonExperienceCalculator
+                        .CalculateNonStandardCompatibilityMonster(
+                            run.ExperienceDefinition,
+                            experienceContext)
+                : default;
+            var scaledExp = baseExperience.ParticipantBaseExperience;
+            var experienceBonusSnapshot = run.CaptureExperienceBonusSnapshot();
             var growthContractBonus = allowsExperience
                 ? CalculateGrowthContractMonsterBonus(session, scaledExp)
                 : 0;
+            var channelBonus = allowsExperience
+                ? DungeonExperienceCalculator.CalculateChannelMonsterBonus(
+                    scaledExp,
+                    experienceBonusSnapshot)
+                : 0;
             var awardedExp = CharacterExperienceService.AddSaturating(
-                scaledExp,
-                growthContractBonus);
+                CharacterExperienceService.AddSaturating(
+                    scaledExp,
+                    growthContractBonus),
+                channelBonus);
 
             var dungeonBasisLevel = (int)monster.Level;
             var dungeonMinimumLevel = (int)monster.Level;
@@ -766,7 +783,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             ExperienceGrantResult grant = null;
-            if (allowsExperience)
+            if (allowsExperience && awardedExp > 0)
             {
                 grant = _services.CharacterExperience.Grant(
                     session.Player,
@@ -778,29 +795,14 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             lock (run.SyncRoot)
             {
-                run.TotalExp = CharacterExperienceService.AddSaturating(
-                    run.TotalExp,
-                    gainedExp);
-                run.MonsterGrowthContractBonusExp =
-                    CharacterExperienceService.AddSaturating(
-                        run.MonsterGrowthContractBonusExp,
-                        growthContractBonus);
-                if (isBoss)
-                    run.BossTotalExp = CharacterExperienceService.AddSaturating(
-                        run.BossTotalExp,
-                        gainedExp);
-                if (isChampion)
-                    run.ChampionTotalExp = CharacterExperienceService.AddSaturating(
-                        run.ChampionTotalExp,
-                        gainedExp);
-                if (isSuperChampion)
-                    run.SuperChampionTotalExp = CharacterExperienceService.AddSaturating(
-                        run.SuperChampionTotalExp,
-                        gainedExp);
-                if (isNamed)
-                    run.NamedMonsterTotalExp = CharacterExperienceService.AddSaturating(
-                        run.NamedMonsterTotalExp,
-                        gainedExp);
+                run.Combat.Experience.RecordMonster(
+                    scaledExp,
+                    growthContractBonus,
+                    isBoss,
+                    isChampion,
+                    isSuperChampion,
+                    isNamed,
+                    channelBonus);
                 run.TotalGold = checked(run.TotalGold + goldGained);
             }
 
@@ -810,7 +812,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session,
                     grant,
                     "DUNGEON_KILL",
-                    growthContractBonus);
+                    growthContractBonus,
+                    channelBonus);
                 if (!session.Player.IsCurrentDungeonRun(identity))
                     return generatedDrops;
                 if (grant.LeveledUp)

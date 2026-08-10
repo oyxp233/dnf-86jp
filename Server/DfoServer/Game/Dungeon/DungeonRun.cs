@@ -62,6 +62,8 @@ namespace DfoServer.Game.Dungeon
             Instance?.RewardPolicy ?? DungeonRewardPolicy.Standard;
         public DungeonDropDefinition DropDefinition =>
             Instance?.DropDefinition ?? DungeonDropDefinition.Standard;
+        internal GameWorld.DungeonExperienceDefinition ExperienceDefinition =>
+            Instance?.ExperienceDefinition;
         public DungeonDropPolicy DropPolicy => DropDefinition.Policy;
         public long PartyDungeonInstanceId => Instance?.PartyDungeonInstanceId ?? 0;
         public long RunId { get; }
@@ -243,6 +245,26 @@ namespace DfoServer.Game.Dungeon
         public int TotalGold { get => Combat.TotalGold; set => Combat.TotalGold = value; }
         public ushort SceneSlotCounter { get => Combat.SceneSlotCounter; set => Combat.SceneSlotCounter = value; }
         public Dictionary<ushort, DropInfo> Drops { get => Combat.Drops; set => Combat.Drops = value; }
+
+        internal DungeonParticipantExperienceSnapshot CaptureExperienceSnapshot()
+        {
+            lock (SyncRoot)
+                return Combat.Experience.Capture();
+        }
+
+        internal bool TryFreezeExperienceBonusSnapshot(
+            DungeonParticipantExperienceBonusSnapshot snapshot)
+        {
+            lock (SyncRoot)
+                return Combat.Experience.TryFreezeBonusSnapshot(snapshot);
+        }
+
+        internal DungeonParticipantExperienceBonusSnapshot
+            CaptureExperienceBonusSnapshot()
+        {
+            lock (SyncRoot)
+                return Combat.Experience.CaptureBonusSnapshot();
+        }
 
         internal SecretShop.SecretShopOffer SecretShopOffer { get => Settlement.SecretShopOffer; set => Settlement.SecretShopOffer = value; }
         public List<ClearRewardGenerator.CardReward> CardRewards { get => Settlement.CardRewards; set => Settlement.CardRewards = value; }
@@ -510,21 +532,43 @@ namespace DfoServer.Game.Dungeon
         {
             lock (SyncRoot)
             {
-                if (_runState != DungeonRunState.ClearCommitting
-                    || !RewardPolicy.AllowsSettlement
-                    || (_settlementState != DungeonSettlementState.NotStarted
-                        && _settlementState
-                            != DungeonSettlementState.Preparing))
+                var canCaptureBeforePresentation =
+                    _runState == DungeonRunState.ClearCommitting
+                    && (_settlementState == DungeonSettlementState.NotStarted
+                        || _settlementState == DungeonSettlementState.Preparing);
+                var canCaptureAfterClear =
+                    _runState == DungeonRunState.Cleared
+                    && _settlementState == DungeonSettlementState.Preparing;
+                if ((!canCaptureBeforePresentation && !canCaptureAfterClear)
+                    || !RewardPolicy.AllowsSettlement)
                 {
                     return false;
                 }
 
-                if (!Settlement.PendingPresentationRankPoint.HasValue)
+                var normalizedRank = Math.Max(0, Math.Min(255, rankPoint));
+                if (Settlement.CapturedPresentationRankPoint.HasValue)
                 {
-                    Settlement.PendingPresentationRankPoint = Math.Max(
-                        0,
-                        Math.Min(255, rankPoint));
+                    // SET_PLAY_RESULT is first-write-wins for the run. A
+                    // replay with a different rank cannot rewrite rewards.
+                    return true;
                 }
+
+                Settlement.CapturedPresentationRankPoint = normalizedRank;
+                if (!Settlement.PendingPresentationRankPoint.HasValue)
+                    Settlement.PendingPresentationRankPoint = normalizedRank;
+                return true;
+            }
+        }
+
+        internal bool TryGetCapturedSettlementRank(out int rankPoint)
+        {
+            lock (SyncRoot)
+            {
+                rankPoint = 0;
+                if (!Settlement.CapturedPresentationRankPoint.HasValue)
+                    return false;
+
+                rankPoint = Settlement.CapturedPresentationRankPoint.Value;
                 return true;
             }
         }

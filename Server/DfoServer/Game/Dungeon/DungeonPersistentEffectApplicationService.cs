@@ -13,6 +13,8 @@ namespace DfoServer.Game.Dungeon
     {
         internal const string SettlementExperienceGrant =
             "settlement-experience-grant";
+        internal const string SettlementScoreExperienceAdjustment =
+            "settlement-score-experience-adjustment";
         internal const string SuitableDungeonLuckyStar =
             "suitable-dungeon-lucky-star";
     }
@@ -160,6 +162,47 @@ namespace DfoServer.Game.Dungeon
             uint rawGain,
             out ExperienceGrantResult result,
             out string error)
+            => TryApplySettlementExperienceCore(
+                DungeonPersistentEffectKinds.SettlementExperienceGrant,
+                effectId,
+                characterId,
+                accountId,
+                previousLevel,
+                previousExp,
+                rawGain,
+                out result,
+                out error);
+
+        internal bool TryApplySettlementScoreExperienceAdjustment(
+            DungeonEffectId effectId,
+            int characterId,
+            int accountId,
+            byte previousLevel,
+            uint previousExp,
+            uint rawGain,
+            out ExperienceGrantResult result,
+            out string error)
+            => TryApplySettlementExperienceCore(
+                DungeonPersistentEffectKinds.SettlementScoreExperienceAdjustment,
+                effectId,
+                characterId,
+                accountId,
+                previousLevel,
+                previousExp,
+                rawGain,
+                out result,
+                out error);
+
+        private bool TryApplySettlementExperienceCore(
+            string effectKind,
+            DungeonEffectId effectId,
+            int characterId,
+            int accountId,
+            byte previousLevel,
+            uint previousExp,
+            uint rawGain,
+            out ExperienceGrantResult result,
+            out string error)
         {
             result = null;
             error = null;
@@ -167,7 +210,7 @@ namespace DfoServer.Game.Dungeon
             {
                 ValidateEffectIdentity(
                     effectId,
-                    DungeonPersistentEffectKinds.SettlementExperienceGrant,
+                    effectKind,
                     characterId);
                 var record = _outbox.Get(effectId);
                 if (record == null)
@@ -197,7 +240,7 @@ namespace DfoServer.Game.Dungeon
 
                 var storedPayload = DeserializePayload<SettlementExperienceEffectPayload>(
                     record,
-                    DungeonPersistentEffectKinds.SettlementExperienceGrant);
+                    effectKind);
                 if (storedPayload.CharacterId != characterId
                     || storedPayload.AccountId != accountId
                     || storedPayload.PreviousLevel != previousLevel
@@ -208,7 +251,11 @@ namespace DfoServer.Game.Dungeon
                         "Settlement experience effect was retried with different inputs.");
                 }
 
-                return TryExecuteSettlementExperience(record, out result, out error);
+                return TryExecuteSettlementExperience(
+                    record,
+                    effectKind,
+                    out result,
+                    out error);
             }
             catch (Exception ex)
             {
@@ -338,8 +385,10 @@ namespace DfoServer.Game.Dungeon
                 switch (record.EffectId.EffectKind)
                 {
                     case DungeonPersistentEffectKinds.SettlementExperienceGrant:
+                    case DungeonPersistentEffectKinds.SettlementScoreExperienceAdjustment:
                         if (TryExecuteSettlementExperience(
                                 record,
+                                record.EffectId.EffectKind,
                                 out var experience,
                                 out var experienceError))
                         {
@@ -391,6 +440,7 @@ namespace DfoServer.Game.Dungeon
 
         private bool TryExecuteSettlementExperience(
             DungeonPersistentEffectRecord initialRecord,
+            string effectKind,
             out ExperienceGrantResult result,
             out string error)
         {
@@ -413,7 +463,7 @@ namespace DfoServer.Game.Dungeon
             {
                 var payload = DeserializePayload<SettlementExperienceEffectPayload>(
                     record,
-                    DungeonPersistentEffectKinds.SettlementExperienceGrant);
+                    effectKind);
                 using (var connection = new SqliteConnection(_connectionString))
                 {
                     connection.Open();

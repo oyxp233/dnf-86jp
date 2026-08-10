@@ -84,7 +84,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"[DungeonHandler] SET_PLAY_RESULT queued until clear commit: " +
                     $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
                     $"rank={presentationRankPoint}");
-                return;
+                if (run.RunState != DungeonRunState.Cleared
+                    || run.SettlementState != DungeonSettlementState.Preparing)
+                {
+                    return;
+                }
             }
 
             await ProjectSettlementPresentationAsync(
@@ -135,6 +139,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             var identity = run.CaptureIdentity();
             try
             {
+                // The presentation reservation serializes late-rank
+                // adjustment with duplicate SET_PLAY_RESULT requests.
+                if (!await ApplyCapturedRankAsync(session, run))
+                {
+                    run.Effects.TryFail(presentationReservation);
+                    return;
+                }
+
                 CapturePresentationRank(settlement, presentationRankPoint);
                 if (!await ExecuteSettlementProjectionEffectAsync(
                         session,
@@ -179,7 +191,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                                     settlement.ClearBaseExp,
                                     scoreBonusExp: ToInt32Saturated(
                                         settlement.ScoreBonusExp),
-                                    clearBonusExp: 0,
+                                    partyClearBreakdownExp:
+                                        settlement.PartyClearBreakdownExp,
+                                    avatarExp: ToInt32Saturated(
+                                        settlement.AvatarBonusExp),
+                                    creatureExp: ToInt32Saturated(
+                                        settlement.CreatureBonusExp),
                                     blackDiamondExp: ToInt32Saturated(
                                         settlement.BlackDiamondBonusExp),
                                     growthContractExp: ToInt32Saturated(
@@ -188,6 +205,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                                         settlement.MonsterGrowthContractBonusExp),
                                     adventureGroupExp: ToInt32Saturated(
                                         settlement.AdventureGroupBonusExp),
+                                    channelExp: ToInt32Saturated(
+                                        settlement.ChannelBonusExp),
                                     monsterExp: settlement.MonsterTotalExp,
                                     bossExp: ToInt32Saturated(
                                         settlement.BossTotalExp),
@@ -252,7 +271,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return;
                 }
 
-                if (settlement.ExperienceGrant?.LeveledUp == true
+                if ((settlement.ExperienceGrant?.LeveledUp == true
+                        || settlement.ScoreAdjustmentExperienceGrant?.LeveledUp == true)
                     && !await ExecuteSettlementProjectionEffectAsync(
                         session,
                         run,
@@ -453,6 +473,16 @@ namespace DfoServer.Network.Handlers.Dungeon
                 if (DungeonClearPresentationPolicy
                         .UsesCommonExperienceAuthority(
                             clearFact.PresentationKind)
+                    && !await ApplyCapturedRankAsync(session, run)
+                )
+                {
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
+                }
+
+                if (DungeonClearPresentationPolicy
+                        .UsesCommonExperienceAuthority(
+                            clearFact.PresentationKind)
                     && !await ExecuteSettlementEffectAsync(
                         session,
                         run,
@@ -584,6 +614,137 @@ namespace DfoServer.Network.Handlers.Dungeon
                 DungeonEffectScope.Player,
                 run.RunId);
 
+        private static DungeonEffectId GetSettlementScoreAdjustmentEffectId(
+            DungeonRun run)
+            => new DungeonEffectId(
+                run.GetSettlementSourceEventId(),
+                DungeonPersistentEffectKinds.SettlementScoreExperienceAdjustment,
+                DungeonEffectScope.Player,
+                run.RunId);
+
+        private async Task<bool> ApplyCapturedRankAsync(
+            EnhancedClientSession session,
+            DungeonRun run)
+        {
+            var settlement = run?.SettlementRuntime;
+            if (session?.Player == null || run == null || settlement == null)
+                return true;
+            if (!run.TryGetCapturedSettlementRank(out var rankPoint))
+                return true;
+
+            var rank = BuildClearRank(rankPoint);
+            uint previousScore;
+            lock (run.SyncRoot)
+            {
+                if (settlement.AuthoritativeRankCaptured)
+                    return true;
+
+                previousScore = settlement.ScoreBonusExp;
+            }
+
+            if (rank.RankBonusIndex < 0 && previousScore > 0)
+            {
+                FileLogger.Log(
+                    $"[DungeonHandler] captured rank would reduce score bonus; " +
+                    $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
+                    $"previous={previousScore} rank={rankPoint}");
+                return false;
+            }
+
+            var scoreBonus = ToUInt32Floor(
+                settlement.ClearBaseExp
+                * MonsterRewardTable.GetClearRankExpBonusRate(
+                    rank.RankBonusIndex));
+            var delta = scoreBonus > previousScore
+                ? scoreBonus - previousScore
+                : 0;
+            var authoritativeEffectId = GetAuthoritativeSettlementEffectId(run);
+            var authoritativeCommitted = run.Effects.GetState(
+                authoritativeEffectId) == DungeonEffectState.Committed;
+
+            if (!authoritativeCommitted || delta == 0)
+            {
+                ApplyRankFields(settlement, rank, scoreBonus);
+                return true;
+            }
+
+            ExperienceGrantResult adjustmentGrant = null;
+            if (!await ExecuteSettlementEffectAsync(
+                    session,
+                    run,
+                    run.CaptureIdentity(),
+                    DungeonPersistentEffectKinds
+                        .SettlementScoreExperienceAdjustment,
+                    () =>
+                    {
+                        var effectId = GetSettlementScoreAdjustmentEffectId(run);
+                        if (!_svc.PersistentEffects
+                                .TryApplySettlementScoreExperienceAdjustment(
+                                    effectId,
+                                    session.Player.CharacterId,
+                                    session.Account?.AccountId ?? 0,
+                                    session.Player.Level,
+                                    session.Player.Exp,
+                                    delta,
+                                    out adjustmentGrant,
+                                    out var error))
+                        {
+                            throw new InvalidOperationException(
+                                "Settlement score experience adjustment failed: "
+                                + error);
+                        }
+
+                        session.Player.Level = adjustmentGrant.NewLevel;
+                        session.Player.Exp = adjustmentGrant.NewExp;
+                        return Task.CompletedTask;
+                    }))
+            {
+                return false;
+            }
+
+            ApplyRankFields(settlement, rank, scoreBonus);
+            settlement.ScoreAdjustmentExperienceGrant = adjustmentGrant;
+            settlement.ExperienceGrant ??= adjustmentGrant;
+            FileLogger.Log(
+                $"[DungeonHandler] settlement score experience adjustment: " +
+                $"instance={run.PartyDungeonInstanceId} run={run.RunId} " +
+                $"rank={rankPoint} scoreBonus={scoreBonus} delta={delta}");
+            return true;
+        }
+
+        private static void ApplyRankFields(
+            DungeonSettlementRuntime settlement,
+            ClearRankParts rank,
+            uint scoreBonus)
+        {
+            settlement.ClientRankPoint = rank.ClientRankPoint;
+            settlement.PresentationRankPoint = rank.RankPoint;
+            settlement.PresentationRankGrade = rank.RankGrade;
+            settlement.PresentationRankBonusIndex = rank.RankBonusIndex;
+            settlement.TimeBonusPoint = rank.TimeBonusPoint;
+            settlement.RankPoint = rank.RankPoint;
+            settlement.RankGrade = rank.RankGrade;
+            settlement.RankBonusIndex = rank.RankBonusIndex;
+            settlement.ScoreBonusExp = scoreBonus;
+            settlement.ClearBonusExp = CharacterExperienceService.AddSaturating(
+                CharacterExperienceService.AddSaturating(
+                    CharacterExperienceService.AddSaturating(
+                        CharacterExperienceService.AddSaturating(
+                            CharacterExperienceService.AddSaturating(
+                                CharacterExperienceService.AddSaturating(
+                                    scoreBonus,
+                                    settlement.AvatarBonusExp),
+                                settlement.CreatureBonusExp),
+                            settlement.ChannelBonusExp),
+                        settlement.GrowthContractBonusExp),
+                    settlement.BlackDiamondBonusExp),
+                settlement.AdventureGroupBonusExp);
+            settlement.ClearTotalExp = CharacterExperienceService.AddSaturating(
+                settlement.ClearBaseExp,
+                settlement.ClearBonusExp);
+            settlement.AuthoritativeRankCaptured = true;
+        }
+
         private DungeonSettlementRuntime BuildSettlementRuntime(
             EnhancedClientSession session,
             DungeonRun run)
@@ -604,27 +765,41 @@ namespace DfoServer.Network.Handlers.Dungeon
                 throw new InvalidOperationException(
                     $"Dungeon {run.DungeonId} has no valid basic level.");
 
-            var clearRank = CalculateAuthoritativeClearRank();
+            var instance = run.Instance;
+            var selection = instance?.Selection;
+            var killStatistics = instance != null
+                ? instance.KillStatistics
+                : default(DungeonKillStatistics);
+            var partyMemberCount = selection?.PartyMemberCount
+                ?? run.EntryPartyMemberCount;
+            var hasCapturedRank = run.TryGetCapturedSettlementRank(
+                out var capturedRankPoint);
+            var clearRank = CalculateAuthoritativeClearRank(
+                capturedRankPoint,
+                hasCapturedRank);
             var clearExp = DungeonClearPresentationPolicy
                     .UsesCommonExperienceAuthority(presentationKind)
                 ? CalculateClearRewardExp(
                     session,
                     run,
                     clearRank.RankBonusIndex,
-                    dungeonLevel)
+                    dungeonLevel,
+                    presentationKind,
+                    killStatistics,
+                    partyMemberCount)
                 : default;
+            var partyClearBreakdownExp = DungeonExperienceCalculator
+                .CalculatePartyClearBreakdown(
+                    run.ExperienceDefinition,
+                    clearExp.Base,
+                    partyMemberCount,
+                    partyEventBonusRate: 0.0);
 
             var lcg = run.RoomLcg ?? new DnfLcg(run.Seed);
-            var instance = run.Instance;
-            var selection = instance?.Selection;
-            var killStatistics = instance != null
-                ? instance.KillStatistics
-                : default(DungeonKillStatistics);
             var rewardContext = new ClearRewardGenerationContext(
                 dungeonLevel,
                 run.Difficulty,
-                partyMemberCount: selection?.PartyMemberCount
-                    ?? run.EntryPartyMemberCount,
+                partyMemberCount: partyMemberCount,
                 rankBonusRate: MonsterRewardTable.GetClearRankExpBonusRate(
                     clearRank.RankBonusIndex),
                 normalKillCount: killStatistics.NormalKillCount,
@@ -694,7 +869,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"paidCost={paidCardCost} paidItem={paidItem.ItemId}");
             }
 
-            var monsterTotalExp = run.TotalExp;
+            var monsterExperience = run.CaptureExperienceSnapshot();
             var clearTimeMilliseconds = run.CalculateElapsedMilliseconds(
                 DateTime.UtcNow);
             var bloodAltarSettlement = isBloodAltar
@@ -715,12 +890,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                 PresentationRankPoint = clearRank.RankPoint,
                 PresentationRankGrade = clearRank.RankGrade,
                 PresentationRankBonusIndex = clearRank.RankBonusIndex,
+                AuthoritativeRankCaptured = hasCapturedRank,
                 TimeBonusPoint = clearRank.TimeBonusPoint,
                 RankPoint = clearRank.RankPoint,
                 RankGrade = clearRank.RankGrade,
                 RankBonusIndex = clearRank.RankBonusIndex,
                 ClearBaseExp = clearExp.Base,
                 ScoreBonusExp = clearExp.ScoreBonus,
+                PartyClearBreakdownExp = partyClearBreakdownExp,
+                AvatarBonusExp = clearExp.AvatarBonus,
+                CreatureBonusExp = clearExp.CreatureBonus,
+                ChannelBonusExp = clearExp.ChannelBonus,
                 GrowthContractBonusExp = clearExp.GrowthContractBonus,
                 BlackDiamondBonusExp = clearExp.BlackDiamondBonus,
                 AdventureGroupBonusExp = clearExp.AdventureGroupBonus,
@@ -733,19 +913,23 @@ namespace DfoServer.Network.Handlers.Dungeon
                 FreeGold = freeGold,
                 FreeItem = freeItem,
                 TowerRewardCandidates = towerRewardCandidates,
-                MonsterTotalExp = monsterTotalExp,
-                BossTotalExp = Math.Min(run.BossTotalExp, monsterTotalExp),
+                MonsterTotalExp = monsterExperience.MonsterTotalExperience,
+                BossTotalExp = Math.Min(
+                    monsterExperience.BossBaseExperience,
+                    monsterExperience.MonsterBaseExperience),
                 ChampionTotalExp = Math.Min(
-                    run.ChampionTotalExp,
-                    monsterTotalExp),
+                    monsterExperience.ChampionBaseExperience,
+                    monsterExperience.MonsterBaseExperience),
                 SuperChampionTotalExp = Math.Min(
-                    run.SuperChampionTotalExp,
-                    monsterTotalExp),
+                    monsterExperience.SuperChampionBaseExperience,
+                    monsterExperience.MonsterBaseExperience),
                 NamedMonsterTotalExp = Math.Min(
-                    run.NamedMonsterTotalExp,
-                    monsterTotalExp),
+                    monsterExperience.NamedMonsterBaseExperience,
+                    monsterExperience.MonsterBaseExperience),
                 MonsterGrowthContractBonusExp =
-                    run.MonsterGrowthContractBonusExp,
+                    monsterExperience.MonsterGrowthContractBonusExperience,
+                MonsterChannelBonusExp =
+                    monsterExperience.MonsterChannelBonusExperience,
                 ClearTimeMilliseconds = clearTimeMilliseconds,
             };
         }
@@ -993,8 +1177,10 @@ namespace DfoServer.Network.Handlers.Dungeon
             return !DungeonData.TryGetTowerOfDespairFloor(dungeonId, out _);
         }
 
-        private static ClearRankParts CalculateAuthoritativeClearRank()
-            => BuildClearRank(0);
+        private static ClearRankParts CalculateAuthoritativeClearRank(
+            int capturedRankPoint,
+            bool hasCapturedRank)
+            => BuildClearRank(hasCapturedRank ? capturedRankPoint : 0);
 
         internal static void CapturePresentationRank(
             DungeonSettlementRuntime settlement,
@@ -1097,19 +1283,44 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRun run,
             int rankBonusIndex,
-            int dungeonLevel)
+            int dungeonLevel,
+            DungeonClearPresentationKind presentationKind,
+            DungeonKillStatistics killStatistics,
+            int partyMemberCount)
         {
-            var baseExp = ExpTableProvider.GetExpRewardBase(dungeonLevel);
-            if (baseExp <= 0)
+            var definition = run.ExperienceDefinition;
+            if (definition == null || !definition.IsAvailable)
                 return default;
 
-            var expWeight = DungeonData.GetExperienceWeight(run.DungeonId);
-            if (expWeight < 0)
-                throw new InvalidOperationException(
-                    $"Dungeon {run.DungeonId} has an invalid experience weight.");
+            uint clearBaseExp;
+            if (definition.UsesStandardFormula
+                && presentationKind == DungeonClearPresentationKind.Standard
+                && run.Tower == null)
+            {
+                var calculated = DungeonExperienceCalculator.CalculateStandardClear(
+                    definition,
+                    new DungeonClearExperienceContext(
+                        session.Player.Level,
+                        run.Difficulty,
+                        killStatistics.TotalKillCount,
+                        partyMemberCount));
+                clearBaseExp = calculated.ParticipantBaseExperience;
+                FileLogger.Log(
+                    $"[DungeonExperience] clear model=Standard " +
+                    $"dungeon={run.DungeonId} level={session.Player.Level} " +
+                    $"kills={killStatistics.TotalKillCount} " +
+                    $"party={Math.Max(1, partyMemberCount)} " +
+                    $"shared={calculated.SharedBaseExperience} " +
+                    $"participant={calculated.ParticipantBaseExperience}");
+            }
+            else
+            {
+                clearBaseExp = CalculateNonStandardCompatibilityClearBase(
+                    definition,
+                    run.Difficulty,
+                    dungeonLevel);
+            }
 
-            var scaledBase = baseExp * expWeight * MonsterRewardTable.GetDifficultyExpRate(run.Difficulty);
-            var clearBaseExp = ToUInt32Floor(scaledBase);
             if (clearBaseExp == 0)
                 return default;
 
@@ -1124,8 +1335,47 @@ namespace DfoServer.Network.Handlers.Dungeon
                 ? ToUInt32Floor(clearBaseExp * BlackDiamondBonusRate)
                 : 0;
             var adventureGroupBonus = CalculateAdventureGroupClearExpBonus(session, accountId, clearBaseExp);
+            var participantBonuses = DungeonExperienceCalculator
+                .CalculateClearParticipantBonuses(
+                    definition,
+                    clearBaseExp,
+                    run.CaptureExperienceBonusSnapshot());
+            var bonusSnapshot = run.CaptureExperienceBonusSnapshot();
+            var channelBonus = DungeonExperienceCalculator
+                .CalculateChannelClearBonus(clearBaseExp, bonusSnapshot);
 
-            return new ClearExpParts(clearBaseExp, scoreBonus, growthContractBonus, blackDiamondBonus, adventureGroupBonus);
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] "
+                + $"CLEAR_EXP channel: dungeon={run.DungeonId} "
+                + $"channel={bonusSnapshot.ChannelId} "
+                + $"channelType={bonusSnapshot.ChannelType} "
+                + $"rate={bonusSnapshot.ChannelExperienceBonusRate:R} "
+                + $"base={clearBaseExp} bonus={channelBonus}");
+
+            return new ClearExpParts(
+                clearBaseExp,
+                scoreBonus,
+                participantBonuses.AvatarBonusExperience,
+                participantBonuses.CreatureBonusExperience,
+                channelBonus,
+                growthContractBonus,
+                blackDiamondBonus,
+                adventureGroupBonus);
+        }
+
+        private static uint CalculateNonStandardCompatibilityClearBase(
+            GameWorld.DungeonExperienceDefinition definition,
+            int difficulty,
+            int dungeonLevel)
+        {
+            var baseExp = ExpTableProvider.GetLegacyQuestRewardBase(dungeonLevel);
+            if (baseExp <= 0)
+                return 0;
+
+            return DungeonExperienceCalculator.FloorToUInt32(
+                baseExp
+                * definition.ExperienceWeight
+                * definition.GetDifficultyRate(difficulty));
         }
 
         private uint CalculateAdventureGroupClearExpBonus(EnhancedClientSession session, int accountId, uint clearBaseExp)
@@ -1198,10 +1448,21 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private readonly struct ClearExpParts
         {
-            internal ClearExpParts(uint baseExp, uint scoreBonus, uint growthContractBonus, uint blackDiamondBonus, uint adventureGroupBonus)
+            internal ClearExpParts(
+                uint baseExp,
+                uint scoreBonus,
+                uint avatarBonus,
+                uint creatureBonus,
+                uint channelBonus,
+                uint growthContractBonus,
+                uint blackDiamondBonus,
+                uint adventureGroupBonus)
             {
                 Base = baseExp;
                 ScoreBonus = scoreBonus;
+                AvatarBonus = avatarBonus;
+                CreatureBonus = creatureBonus;
+                ChannelBonus = channelBonus;
                 GrowthContractBonus = growthContractBonus;
                 BlackDiamondBonus = blackDiamondBonus;
                 AdventureGroupBonus = adventureGroupBonus;
@@ -1209,10 +1470,25 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             internal uint Base { get; }
             internal uint ScoreBonus { get; }
+            internal uint AvatarBonus { get; }
+            internal uint CreatureBonus { get; }
+            internal uint ChannelBonus { get; }
             internal uint GrowthContractBonus { get; }
             internal uint BlackDiamondBonus { get; }
             internal uint AdventureGroupBonus { get; }
-            internal uint Bonus => CharacterExperienceService.AddSaturating(CharacterExperienceService.AddSaturating(CharacterExperienceService.AddSaturating(ScoreBonus, GrowthContractBonus), BlackDiamondBonus), AdventureGroupBonus);
+            internal uint Bonus => CharacterExperienceService.AddSaturating(
+                CharacterExperienceService.AddSaturating(
+                    CharacterExperienceService.AddSaturating(
+                        CharacterExperienceService.AddSaturating(
+                            CharacterExperienceService.AddSaturating(
+                                CharacterExperienceService.AddSaturating(
+                                    ScoreBonus,
+                                    AvatarBonus),
+                                CreatureBonus),
+                            ChannelBonus),
+                        GrowthContractBonus),
+                    BlackDiamondBonus),
+                AdventureGroupBonus);
             internal uint Total => CharacterExperienceService.AddSaturating(Base, Bonus);
         }
 

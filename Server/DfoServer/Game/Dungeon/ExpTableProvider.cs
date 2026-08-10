@@ -11,7 +11,7 @@ namespace DfoServer.Game.Dungeon
 
         private static readonly object _lock = new object();
         private static int[] _levelThresholds;
-        private static int[] _monsterBaseExp;
+        private static int[] _questRewardExp;
         private static int[] _monsterGold;
         private static int[] _monsterGoldVariance;
 
@@ -31,18 +31,13 @@ namespace DfoServer.Game.Dungeon
             return _levelThresholds[level - 1];
         }
 
-        public static int GetMonsterBaseExp(int monsterLevel)
+        // Only non-standard compatibility settlement may consume this task
+        // reward table. Standard dungeon EXP uses monster_reward_ref semantics.
+        public static int GetLegacyQuestRewardBase(int level)
         {
             EnsureLoaded();
-            if (monsterLevel < 1 || monsterLevel > _monsterBaseExp.Length) return 0;
-            return _monsterBaseExp[monsterLevel - 1];
-        }
-
-        public static int GetExpRewardBase(int level)
-        {
-            EnsureLoaded();
-            if (level < 1 || level > _monsterBaseExp.Length) return 0;
-            return _monsterBaseExp[level - 1];
+            if (level < 1 || level > _questRewardExp.Length) return 0;
+            return _questRewardExp[level - 1];
         }
 
         public static int GetMonsterGold(int monsterLevel, out int variancePercent)
@@ -71,8 +66,8 @@ namespace DfoServer.Game.Dungeon
         private static void LoadAll()
         {
             _levelThresholds = ParseExpTable();
-            ParseQuestParameter(out _monsterBaseExp, out _monsterGold, out _monsterGoldVariance);
-            FileLogger.Log($"[ExpTableProvider] Loaded: {_levelThresholds.Length} level thresholds, {_monsterBaseExp.Length} monster exp, {_monsterGold.Length} monster gold");
+            ParseQuestParameter(out _questRewardExp, out _monsterGold, out _monsterGoldVariance);
+            FileLogger.Log($"[ExpTableProvider] Loaded: {_levelThresholds.Length} level thresholds, {_questRewardExp.Length} quest reward exp, {_monsterGold.Length} monster gold");
         }
 
         private static int[] ParseExpTable()

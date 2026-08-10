@@ -95,6 +95,16 @@ namespace DfoServer.Network
                        channel.ListenerGamePort == listenerGamePort)
                ?? BuildGameChannels(includeFreeDuel: false)[0];
 
+        public static bool TryResolveGameChannel(
+            int listenerGamePort,
+            out GameChannelEndpoint channel)
+        {
+            channel = BuildGameChannels(includeFreeDuel: true)
+                .FirstOrDefault(candidate =>
+                    candidate.ListenerGamePort == listenerGamePort);
+            return channel != null;
+        }
+
         public static GameChannelEndpoint FindGameChannel(int channelId)
             => BuildGameChannels(includeFreeDuel: true).FirstOrDefault(
                 channel => channel.ChannelId == channelId);

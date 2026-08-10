@@ -21,6 +21,130 @@ namespace DfoServer.Game.Inventory
                 out result);
         }
 
+        internal static bool TryApplyTicket(
+            InventoryService inventory,
+            SeparateUpgradeCommand command,
+            SeparateUpgradeTicketDefinition ticket,
+            SeparateUpgradeTable table,
+            ItemMetadata metadata,
+            out SeparateUpgradeResult result)
+        {
+            return TryApplyTicket(
+                inventory,
+                command,
+                ticket,
+                table,
+                metadata,
+                () => Infrastructure.ServerRandom.Next(10000),
+                out result);
+        }
+
+        internal static bool TryApplyTicket(
+            InventoryService inventory,
+            SeparateUpgradeCommand command,
+            SeparateUpgradeTicketDefinition ticket,
+            SeparateUpgradeTable table,
+            ItemMetadata metadata,
+            Func<int> rollProvider,
+            out SeparateUpgradeResult result)
+        {
+            result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorInvalidTarget);
+            if (inventory == null || command == null || ticket == null || table == null
+                || metadata == null || rollProvider == null
+                || (!ticket.IsFixed && !ticket.IsAdditional)
+                || (command.TargetListType != InventoryListType.Main
+                    && command.TargetListType != InventoryListType.Equipment)
+                || (command.TargetListType == InventoryListType.Main
+                    && command.TargetSlotIndex == command.MaterialSlotIndex))
+            {
+                return false;
+            }
+
+            var target = inventory.GetItem(command.TargetListType, command.TargetSlotIndex);
+            if (target == null || target.ItemKind != ItemCore.KindEquipment
+                || target.ItemId != command.TargetItemTemplateId || IsLocked(inventory, target))
+            {
+                return false;
+            }
+
+            if (!EquipmentTypeInfo.IsWeapon(EquipmentTypeInfo.ParseOrUnknown(metadata.EquipmentType)))
+            {
+                result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorNotWeapon);
+                return false;
+            }
+
+            var ticketItem = inventory.GetItem(InventoryListType.Main, command.MaterialSlotIndex);
+            if (ticketItem == null || ticketItem.Count < 1
+                || !InventoryStackRuleService.IsStackable(ticketItem))
+            {
+                result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorInvalidMaterial);
+                return false;
+            }
+
+            if (ticketItem.ItemId != ticket.ItemTemplateId)
+            {
+                result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorInvalidMaterial);
+                return false;
+            }
+
+            var oldLevel = target.GenuineUpgrade;
+            var targetLevel = ticket.TargetLevel;
+            if (ticket.IsAdditional)
+            {
+                var maximumSourceLevel = ticket.ApplyValue >= 0
+                    ? Math.Min(ticket.ApplyValue, table.MaxLevel - ticket.TargetLevel)
+                    : table.MaxLevel - ticket.TargetLevel;
+                if (oldLevel > maximumSourceLevel)
+                {
+                    result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorMaxLevel);
+                    return false;
+                }
+                targetLevel = checked((byte)(oldLevel + ticket.TargetLevel));
+            }
+            var roll = Math.Max(0, Math.Min(9999, rollProvider()));
+            var succeeded = roll < ticket.SuccessWeight;
+            var updatedTarget = target.Copy();
+            if (succeeded)
+                updatedTarget.GenuineUpgrade = targetLevel;
+            var ticketItemId = ticketItem.ItemId;
+            var ticketSnapshot = ticketItem.Copy();
+
+            if (!InventoryDeleteService.TryConsumeFromSlot(
+                    inventory,
+                    InventoryListType.Main,
+                    command.MaterialSlotIndex,
+                    ticketItemId,
+                    1,
+                    out var deletion))
+            {
+                result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorMaterialCommit);
+                return false;
+            }
+
+            if (succeeded && !inventory.SetItem(command.TargetListType, command.TargetSlotIndex, updatedTarget))
+            {
+                inventory.SetItem(InventoryListType.Main, command.MaterialSlotIndex, ticketSnapshot);
+                result = SeparateUpgradeResult.Error(command, SeparateUpgradeResult.ErrorMaterialCommit);
+                return false;
+            }
+
+            result = new SeparateUpgradeResult
+            {
+                Command = command,
+                UpgradeSucceeded = succeeded,
+                OldLevel = oldLevel,
+                NewLevel = succeeded ? targetLevel : oldLevel,
+                TargetReinforceLevel = target.Upgrade,
+                SuccessWeight = ticket.SuccessWeight,
+                MaterialItemTemplateId = ticketItemId,
+                MaterialCost = 1,
+                MaterialRemainingCount = deletion.RemainingCount,
+                NoticeRequired = succeeded && targetLevel >= NoticeMinimumLevel,
+                TargetItemSnapshot = updatedTarget,
+            };
+            return true;
+        }
+
         internal static bool TryUpgrade(
             InventoryService inventory,
             SeparateUpgradeCommand command,

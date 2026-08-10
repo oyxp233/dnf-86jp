@@ -153,12 +153,43 @@ namespace DfoServer.Game.Dungeon
         internal int[] BossMapPos { get; set; }
         internal int SelectedBossMapId { get; set; } = -1;
 
-        internal uint TotalExp { get; set; }
-        internal uint BossTotalExp { get; set; }
-        internal uint ChampionTotalExp { get; set; }
-        internal uint SuperChampionTotalExp { get; set; }
-        internal uint NamedMonsterTotalExp { get; set; }
-        internal uint MonsterGrowthContractBonusExp { get; set; }
+        internal DungeonParticipantExperienceRuntime Experience { get; } =
+            new DungeonParticipantExperienceRuntime();
+        internal uint TotalExp
+        {
+            get => Experience.MonsterTotalExperience;
+            set => Experience.SetMonsterTotalForCompatibility(value);
+        }
+        internal uint BossTotalExp
+        {
+            get => Experience.BossBaseExperience;
+            set => Experience.SetBossBaseForCompatibility(value);
+        }
+        internal uint ChampionTotalExp
+        {
+            get => Experience.ChampionBaseExperience;
+            set => Experience.SetChampionBaseForCompatibility(value);
+        }
+        internal uint SuperChampionTotalExp
+        {
+            get => Experience.SuperChampionBaseExperience;
+            set => Experience.SetSuperChampionBaseForCompatibility(value);
+        }
+        internal uint NamedMonsterTotalExp
+        {
+            get => Experience.NamedMonsterBaseExperience;
+            set => Experience.SetNamedMonsterBaseForCompatibility(value);
+        }
+        internal uint MonsterGrowthContractBonusExp
+        {
+            get => Experience.MonsterGrowthContractBonusExperience;
+            set => Experience.SetGrowthContractBonusForCompatibility(value);
+        }
+        internal uint MonsterChannelBonusExp
+        {
+            get => Experience.MonsterChannelBonusExperience;
+            set => Experience.SetChannelBonusForCompatibility(value);
+        }
         internal int TotalGold { get; set; }
 
         internal ushort SceneSlotCounter { get; set; }
@@ -187,6 +218,7 @@ namespace DfoServer.Game.Dungeon
         internal bool FreeCardRewardDelivered { get; set; }
         internal bool PaidCardRewardDelivered { get; set; }
         internal int CardAutoFlipDelayMs { get; set; }
+        internal int? CapturedPresentationRankPoint { get; set; }
         internal int? PendingPresentationRankPoint { get; set; }
         internal TournamentParticipantRewardState Tournament { get; set; }
     }

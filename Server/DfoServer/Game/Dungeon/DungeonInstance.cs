@@ -97,6 +97,16 @@ namespace DfoServer.Game.Dungeon
         public int NormalKillCount { get; }
         public int ChampionKillCount { get; }
         public int BossKillCount { get; }
+        public int TotalKillCount
+        {
+            get
+            {
+                var total = (long)NormalKillCount
+                    + ChampionKillCount
+                    + BossKillCount;
+                return total >= int.MaxValue ? int.MaxValue : (int)total;
+            }
+        }
     }
 
     public enum DungeonActorDeathKind
@@ -612,7 +622,8 @@ namespace DfoServer.Game.Dungeon
                 dungeonId,
                 difficulty,
                 DungeonRewardPolicy.Standard,
-                DungeonDropDefinition.CreateStandard(dungeonId))
+                DungeonDropDefinition.CreateStandard(dungeonId),
+                GameWorld.DungeonExperienceDefinitionCatalog.Resolve(dungeonId))
         {
         }
 
@@ -624,7 +635,8 @@ namespace DfoServer.Game.Dungeon
                 dungeonId,
                 difficulty,
                 rewardPolicy,
-                DungeonDropDefinition.CreateStandard(dungeonId))
+                DungeonDropDefinition.CreateStandard(dungeonId),
+                GameWorld.DungeonExperienceDefinitionCatalog.Resolve(dungeonId))
         {
         }
 
@@ -633,6 +645,21 @@ namespace DfoServer.Game.Dungeon
             byte difficulty,
             DungeonRewardPolicy rewardPolicy,
             DungeonDropDefinition dropDefinition)
+            : this(
+                dungeonId,
+                difficulty,
+                rewardPolicy,
+                dropDefinition,
+                GameWorld.DungeonExperienceDefinitionCatalog.Resolve(dungeonId))
+        {
+        }
+
+        internal DungeonInstance(
+            short dungeonId,
+            byte difficulty,
+            DungeonRewardPolicy rewardPolicy,
+            DungeonDropDefinition dropDefinition,
+            GameWorld.DungeonExperienceDefinition experienceDefinition)
         {
             PartyDungeonInstanceId = DungeonIdentityGenerator.NextInstanceId();
             DungeonId = dungeonId;
@@ -640,6 +667,8 @@ namespace DfoServer.Game.Dungeon
             RewardPolicy = rewardPolicy ?? throw new ArgumentNullException(nameof(rewardPolicy));
             DropDefinition = dropDefinition
                 ?? throw new ArgumentNullException(nameof(dropDefinition));
+            ExperienceDefinition = experienceDefinition
+                ?? throw new ArgumentNullException(nameof(experienceDefinition));
             CreatedUtc = DateTime.UtcNow;
         }
 
@@ -650,6 +679,10 @@ namespace DfoServer.Game.Dungeon
         public byte Difficulty { get; }
         public DungeonRewardPolicy RewardPolicy { get; }
         public DungeonDropDefinition DropDefinition { get; }
+        internal GameWorld.DungeonExperienceDefinition ExperienceDefinition
+        {
+            get;
+        }
         public DateTime CreatedUtc { get; }
         public DungeonEffectLedger Effects { get; } = new DungeonEffectLedger();
         public DungeonParticipantEffectJournal ParticipantEffects { get; } =

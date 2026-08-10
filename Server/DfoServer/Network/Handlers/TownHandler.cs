@@ -489,23 +489,100 @@ namespace DfoServer.Network.Handlers
             GamePacketHeader header,
             byte[] body)
         {
-            if (GameChannelTeleportPolicy.CanUsePartyTeleport(
-                    session.ListenerPort))
+            if (!PartyTeleportRequest.TryParse(body, out var request))
             {
+                FileLogger.Log(
+                    $"[{ProtocolName}] PARTY_TELEPORT rejected invalid body: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"length={body?.Length ?? 0}");
                 return;
             }
 
-            var parsed = PartyTeleportRequest.TryParse(
-                body,
-                out var request);
+            if (!GameChannelTeleportPolicy.CanUsePartyTeleport(
+                    session.ListenerPort)
+                || !GameChannelSpawnPolicy.CanEnterTown(
+                    session.ListenerPort,
+                    request.TownId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] PARTY_TELEPORT rejected by channel policy: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"listener={session?.ListenerPort ?? 0} " +
+                    $"target={request.TownId}:{request.AreaId}");
+                await ChannelTownRestrictionSender.SendAsync(session);
+                return;
+            }
+
+            if (session?.Player == null
+                || session.Player.CurrentRun != null
+                || _partyManager == null
+                || _sessions == null)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] PARTY_TELEPORT rejected unavailable state: " +
+                    $"cid={session?.Player?.CharacterId ?? 0}");
+                return;
+            }
+
+            var party = _partyManager.GetPartyByUser(
+                session.Player.UserId);
+            var snapshot = party == null
+                ? null
+                : _partyManager.GetPartySnapshot(party.PartyId);
+            if (snapshot == null
+                || !snapshot.IsLeader(session.Player.UserId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] PARTY_TELEPORT rejected non-leader: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"uid={session.Player.UserId}");
+                return;
+            }
+
+            var areaBody = new byte[6];
+            Buffer.BlockCopy(body, 0, areaBody, 0, areaBody.Length);
+            var moved = 0;
+            foreach (var member in snapshot.MembersBySlot())
+            {
+                EnhancedClientSession memberSession;
+                if (member.UserId == session.Player.UserId)
+                {
+                    memberSession = session;
+                }
+                else if (!_sessions.TryGet(
+                             member.CharacterId,
+                             out memberSession))
+                {
+                    continue;
+                }
+
+                if (memberSession?.Player == null
+                    || memberSession.SessionId != member.SessionId
+                    || memberSession.ListenerPort != session.ListenerPort
+                    || memberSession.Player.CurrentRun != null
+                    || !GameChannelTeleportPolicy.CanUsePartyTeleport(
+                        memberSession.ListenerPort)
+                    || !GameChannelSpawnPolicy.CanEnterTown(
+                        memberSession.ListenerPort,
+                        request.TownId))
+                {
+                    continue;
+                }
+
+                await SetUserAreaCoreAsync(
+                    memberSession,
+                    areaBody,
+                    default(TownProjectionGuard));
+                moved++;
+            }
+
             FileLogger.Log(
-                $"[{ProtocolName}] PARTY_TELEPORT rejected by channel policy: " +
-                $"cid={session?.Player?.CharacterId ?? 0} " +
-                $"listener={session?.ListenerPort ?? 0} " +
-                (parsed
-                    ? $"target={request.TownId}:{request.AreaId}"
-                    : "invalidBody=true"));
-            await ChannelTownRestrictionSender.SendAsync(session);
+                $"[{ProtocolName}] PARTY_TELEPORT: " +
+                $"leaderCid={session.Player.CharacterId} " +
+                $"party={snapshot.PartyId} " +
+                $"target={request.TownId}:{request.AreaId} " +
+                $"pos=({request.X},{request.Y}) direction={request.Direction} " +
+                $"moved={moved}/{snapshot.Count}");
         }
 
         public async Task Handle_ENUM_CMDPACKET_GIVEUP_GAME(EnhancedClientSession session, GamePacketHeader header, byte[] body)

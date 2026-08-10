@@ -88,6 +88,7 @@ namespace DfoServer
             ("--selftest-character-experience-progression", SelfTests.CharacterExperienceProgressionSelfTest.Run),
             ("--selftest-party", SelfTests.PartySelfTest.Run),
             ("--selftest-party-command-isolation", SelfTests.PartyCommandIsolationSelfTest.Run),
+            ("--selftest-chat-broadcast", SelfTests.ChatBroadcastSelfTest.Run),
             ("--selftest-party-udp-relay-core", SelfTests.PartyUdpRelayCoreSelfTest.Run),
             ("--selftest-other-user-info", SelfTests.OtherUserInfoSelfTest.Run),
             ("--selftest-other-user-info-protocol", SelfTests.OtherUserInfoProtocolSelfTest.Run),

@@ -58,6 +58,7 @@ namespace DfoServer.Network
         private readonly Game.Party.PartyManager _partyManager;
         private readonly DungeonInstanceRegistry _dungeonInstances;
         private readonly PartyHandler _partyHandler;
+        private readonly ChatHandler _chatHandler;
         private readonly Handlers.Dungeon.DungeonRejoinCoordinator
             _dungeonRejoin;
         private readonly CharacterTransitionCoordinator _characterTransitions;
@@ -275,6 +276,9 @@ namespace DfoServer.Network
                 sessionDirectory,
                 udpRelay,
                 characterTransitions: _characterTransitions);
+            _chatHandler = new ChatHandler(
+                sessionDirectory,
+                _partyManager);
             _dungeonRejoin = new Handlers.Dungeon.DungeonRejoinCoordinator(
                 _dungeonInstances,
                 _partyHandler.TryRestoreDungeonParticipantAsync,
@@ -419,6 +423,8 @@ namespace DfoServer.Network
 
         private void RegisterPartyHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
+            d[(ushort)CmdPacketType.SEND_MESSAGE] =
+                _chatHandler.Handle_SEND_MESSAGE;
             d[0x000C] = _partyHandler.Handle_SET_PARTY_INFO;        // 12 创建/更新队伍
             d[0x000D] = _partyHandler.Handle_LEAVE_PARTY;           // 13 退队
             d[0x000E] = _partyHandler.Handle_WALKOUT_PARTY_MEMBER;  // 14 踢人

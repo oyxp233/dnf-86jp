@@ -88,6 +88,27 @@ namespace DfoServer.SelfTests
                 questTrainingFilesRemainStandard,
                 ref failures);
 
+            var antonRaid = DungeonRewardPolicyData.Resolve(210);
+            Check(
+                "Anton raid policy disables every monster-death item drop while keeping progression",
+                antonRaid.Kind == DungeonRewardPolicyKind.AntonRaid
+                && antonRaid.AllowsMonsterExperience
+                && !antonRaid.AllowsMonsterDrops
+                && !antonRaid.AllowsQuestDrops
+                && antonRaid.AllowsQuestProgress
+                && antonRaid.AllowsPetExperience
+                && antonRaid.AllowsClearCommit
+                && antonRaid.AllowsSettlement,
+                ref failures);
+            Check(
+                "Anton raid policy covers both phases without matching ordinary dungeons",
+                DungeonRewardPolicyData.IsAntonRaidDungeonId(210)
+                && DungeonRewardPolicyData.IsAntonRaidDungeonId(215)
+                && DungeonRewardPolicyData.IsAntonRaidDungeonId(218)
+                && DungeonRewardPolicyData.IsAntonRaidDungeonId(224)
+                && !DungeonRewardPolicyData.IsAntonRaidDungeonId(217)
+                && !DungeonRewardPolicyData.IsAntonRaidDungeonId(225),
+                ref failures);
             var standard = DungeonRewardPolicy.Standard;
             Check(
                 "standard policy keeps all existing reward and progression paths",

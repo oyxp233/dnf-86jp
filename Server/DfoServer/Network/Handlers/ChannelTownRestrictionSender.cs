@@ -25,5 +25,16 @@ namespace DfoServer.Network.Handlers
                 (ushort)NotiPacketType.SERVER_NOTICE_MESSAGE,
                 ServerNoticeMessageBuilder.Build(RestrictionMessage)));
         }
+        internal static async Task SendCurrentAreaAsync(
+            EnhancedClientSession session)
+        {
+            if (session?.Player == null)
+                return;
+            var current = TownAreaNotificationBuilder.CreateCurrentSnapshot(session.Player);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                0x0017,
+                TownAreaNotificationBuilder.BuildUserArea(current)));
+        }
     }
 }

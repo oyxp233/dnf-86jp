@@ -58,6 +58,7 @@ namespace DfoServer.Network
         private readonly Game.Party.PartyManager _partyManager;
         private readonly DungeonInstanceRegistry _dungeonInstances;
         private readonly PartyHandler _partyHandler;
+        private readonly RaidHandler _raidHandler;
         private readonly ChatHandler _chatHandler;
         private readonly Handlers.Dungeon.DungeonRejoinCoordinator
             _dungeonRejoin;
@@ -224,13 +225,15 @@ namespace DfoServer.Network
                     sqliteSelectCharacterDataSource,
                     _inventoryRefreshSender),
                 expertJobOperations);
+            var raidManager = new Game.Raid.RaidManager();
             _townHandler = new TownHandler(
                 characterRepository,
                 sqliteSelectCharacterDataSource,
                 _partyManager,
                 sessionDirectory,
                 _inventoryRefreshSender,
-                _dungeonInstances);
+                _dungeonInstances,
+                raidManager);
             var reviveCoinService = new Game.ReviveCoin.ReviveCoinService(dailyResetService);
             _dungeonHandler = new DungeonHandler(
                 dungeonPersistentEffects,
@@ -243,7 +246,8 @@ namespace DfoServer.Network
                 _partyManager,
                 sessionDirectory,
                 mercenaryRestrictions: mercenaryRestrictions,
-                instanceRegistry: _dungeonInstances);
+                instanceRegistry: _dungeonInstances,
+                raidManager: raidManager);
             _secretShopHandler = new SecretShopHandler(_inventoryRefreshSender);
             _staminaHandler = new StaminaHandler(_inventoryRefreshSender);
             _settingsHandler = new SettingsHandler(sessionDirectory);
@@ -276,6 +280,10 @@ namespace DfoServer.Network
                 sessionDirectory,
                 udpRelay,
                 characterTransitions: _characterTransitions);
+            _raidHandler = new RaidHandler(
+                characterRepository,
+                sessionDirectory,
+                raidManager);
             _chatHandler = new ChatHandler(
                 sessionDirectory,
                 _partyManager);
@@ -337,6 +345,7 @@ namespace DfoServer.Network
             RegisterCollectionBoxHandlers(_cmdDispatch);
             RegisterMercenaryHandlers(_cmdDispatch);
             RegisterPartyHandlers(_cmdDispatch);
+            RegisterRaidHandlers(_cmdDispatch);
             _cmdDispatch[(ushort)CmdPacketType.SET_UDP_IP_PORT] = HandleSetUdpEndpoint;
             RegisterExpertJobHandlers(_cmdDispatch);
             RegisterMiscHandlers(_cmdDispatch);
@@ -355,10 +364,11 @@ namespace DfoServer.Network
             return _characterSessionLifecycle.HandleConnectedAsync(session);
         }
 
-        public override Task OnClientDisconnected(
+        public override async Task OnClientDisconnected(
             EnhancedClientSession session)
         {
-            return _characterSessionLifecycle.HandleDisconnectedAsync(session);
+            _raidHandler.ClearSession(session.SessionId);
+            await _characterSessionLifecycle.HandleDisconnectedAsync(session);
         }
 
         public override async Task OnPacketReceived(EnhancedClientSession session, FlexiblePacket packet)
@@ -426,7 +436,15 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.SEND_MESSAGE] =
                 _chatHandler.Handle_SEND_MESSAGE;
             d[0x000C] = _partyHandler.Handle_SET_PARTY_INFO;        // 12 创建/更新队伍
-            d[0x000D] = _partyHandler.Handle_LEAVE_PARTY;           // 13 退队
+            d[0x000D] = async (s, h, b) =>
+            {
+                var userId = s?.Player?.UserId ?? (ushort)0;
+                var wasInParty = userId != 0
+                    && _partyManager.GetPartyByUser(userId) != null;
+                await _partyHandler.Handle_LEAVE_PARTY(s, h, b);
+                if (wasInParty && _partyManager.GetPartyByUser(userId) == null)
+                    await _raidHandler.HandleNormalPartyLeftAsync(userId);
+            };                                                      // 13 leave party
             d[0x000E] = _partyHandler.Handle_WALKOUT_PARTY_MEMBER;  // 14 踢人
             d[0x000A] = _partyHandler.Handle_REQUEST_PEER;          // 10 右键同屏玩家→组队/交易邀请(按uid)→给目标发 SC 0x0007 弹框
             d[0x000B] = _partyHandler.Handle_RES_PEER;              // 11 被邀请者应答(body=邀请者uid+reqType)→组队并广播 PARTY_INFO
@@ -441,6 +459,27 @@ namespace DfoServer.Network
             d[0x01DF] = (s, h, b) => Task.CompletedTask;            // P2P_STATISTICS
         }
 
+        private void RegisterRaidHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
+        {
+            d[(ushort)CmdPacketType.CREATE_RAID] = _raidHandler.HandleCreateRaid;
+            d[(ushort)CmdPacketType.RAID_ENTRY_COST_INFO] = _raidHandler.HandleEntryCostInfo;
+            d[(ushort)CmdPacketType.RAID_BUFF_SYSTEM] = _raidHandler.HandleRaidBuffSystem;
+            d[(ushort)CmdPacketType.RAID_MONSTER_HP] = _raidHandler.HandleRaidMonsterHp;
+            d[(ushort)CmdPacketType.LEAVE_RAID] = _raidHandler.HandleLeaveRaid;
+            d[(ushort)CmdPacketType.START_RAID] = _raidHandler.HandleStartRaid;
+            d[(ushort)CmdPacketType.RAID_MOVIE_SKIP] = _raidHandler.HandleRaidMovieSkip;
+            d[(ushort)CmdPacketType.SELECT_RAID_REWARD_CARD] = _raidHandler.HandleSelectRaidRewardCard;
+            d[(ushort)CmdPacketType.RAID_DO_BEHAVIOR] = _raidHandler.HandleRaidDoBehavior;
+            d[(ushort)CmdPacketType.RAID_SET_SYMBOL] = _raidHandler.HandleRaidSetSymbol;
+            d[(ushort)CmdPacketType.RAID_MANAGER_WORK] = _raidHandler.HandleRaidManagerWork;
+            d[(ushort)CmdPacketType.MODIFY_RAID_INFO] = _raidHandler.HandleModifyRaidInfo;
+            d[0x00D9] = async (s, h, b) =>
+            {
+                if (await _raidHandler.TryHandleCreatePopupClose(s, h, b))
+                    return;
+                await _lotteryItemHandler.HandleOverflowInfo(s, h, b);
+            };
+        }
         private async Task HandleSetUdpEndpoint(
             EnhancedClientSession session,
             GamePacketHeader header,
@@ -580,22 +619,114 @@ namespace DfoServer.Network
             d[0x00C9] = _inventoryHandler.Handle_AVATAR_EMBLEM_ATTACH;
         }
 
+        private async Task HandleRaidAwareSetPlayResult(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            var run = session?.Player?.CurrentRun;
+            var dungeonId = run?.DungeonId ?? 0;
+            var wasCleared = run?.Phase == DungeonRunPhase.Cleared;
+            await _dungeonHandler.Handle_SET_PLAY_RESULT(session, header, body);
+            if (wasCleared
+                && run != null
+                && run.Phase == DungeonRunPhase.ResultShown)
+            {
+                if (RaidHandler.IsAntonRaidDungeon(dungeonId))
+                {
+                    Handlers.Dungeon.DungeonRunLifecycle.CancelAutoFlip(session);
+                    run.CardRewards = null;
+                    run.Phase = DungeonRunPhase.CardsRevealed;
+                    FileLogger.Log(
+                        $"[GameProtocol] RAID_DUNGEON_SETTLEMENT " +
+                        $"normal-card-flow suppressed dungeon={dungeonId}");
+                }
+                await _raidHandler.HandleDungeonClearedAsync(session, dungeonId);
+            }
+        }
+
+        private async Task HandleRaidAwareDungeonExit(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body,
+            Func<EnhancedClientSession, GamePacketHeader, byte[], Task> handler,
+            string reason)
+        {
+            var run = session?.Player?.CurrentRun;
+            var dungeonId = run?.DungeonId ?? 0;
+            await handler(session, header, body);
+            if (run != null && session?.Player?.CurrentRun == null)
+                await _raidHandler.HandleDungeonAbortedAsync(
+                    session,
+                    dungeonId,
+                    reason);
+        }
+
+        private async Task HandleRaidAwareFinishLoading(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            await _townHandler.Handle_ENUM_CMDPACKET_FINISH_LOADING(
+                session,
+                header,
+                body);
+            await _raidHandler.HandleDungeonLoadedAsync(session);
+        }
+
+        private async Task HandleRaidAwareCharacterDeath(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            var dungeonId = session?.Player?.CurrentRun?.DungeonId ?? 0;
+            await _dungeonHandler.Handle_ENUM_CMDPACKET_DIE_CHARACTER(
+                session,
+                header,
+                body);
+            if (RaidHandler.IsAntonRaidDungeon(dungeonId))
+                await _raidHandler.HandleDungeonCharacterDeathAsync(
+                    session,
+                    dungeonId);
+        }
+
+        private async Task HandleRaidAwareUseCoin(
+            EnhancedClientSession session,
+            GamePacketHeader header,
+            byte[] body)
+        {
+            var dungeonId = session?.Player?.CurrentRun?.DungeonId ?? 0;
+            var targetUserId = body != null && body.Length >= sizeof(ushort)
+                ? BitConverter.ToUInt16(body, 0)
+                : session?.Player?.UserId ?? (ushort)0;
+            var revived = await _dungeonHandler.HandleUseCoinWithResultAsync(
+                session,
+                header,
+                body);
+            if (revived && RaidHandler.IsAntonRaidDungeon(dungeonId))
+            {
+                await _raidHandler.HandleDungeonCharacterReviveAsync(
+                    session,
+                    dungeonId,
+                    targetUserId);
+            }
+        }
         private void RegisterDungeonHandlers(Dictionary<ushort, Func<EnhancedClientSession, GamePacketHeader, byte[], Task>> d)
         {
             d[0x000F] = _dungeonHandler.Handle_ENUM_CMDPACKET_ENTER_SELECT_DUNGEON;
             d[0x0010] = _dungeonHandler.Handle_ENUM_CMDPACKET_SELECT_DUNGEON;
             d[0x0027] = _dungeonHandler.Handle_ENUM_CMDPACKET_DIE_MONSTER;
-            d[0x0028] = _dungeonHandler.Handle_ENUM_CMDPACKET_DIE_CHARACTER;       //40
-            d[0x0029] = _dungeonHandler.Handle_ENUM_CMDPACKET_USE_COIN;
+            d[0x0028] = HandleRaidAwareCharacterDeath;       //40
+            d[0x0029] = HandleRaidAwareUseCoin;
             d[0x002B] = _dungeonHandler.Handle_ENUM_CMDPACKET_GET_ITEM;
             d[0x002D] = _dungeonHandler.Handle_ENUM_CMDPACKET_MOVE_MAP;
-            d[0x002E] = _dungeonHandler.Handle_SET_PLAY_RESULT;                    //46
+            d[0x002E] = HandleRaidAwareSetPlayResult;                    //46
             d[0x002F] = _dungeonHandler.Handle_ENUM_CMDPACKET_DROP_ITEM;
             d[0x0045] = _dungeonHandler.Handle_CARD_START_REQUEST;
             d[0x0047] = _dungeonHandler.Handle_ENUM_CMDPACKET_SELECT_CARD;
-            d[0x0048] = _dungeonHandler.Handle_ENUM_CMDPACKET_EPLP_COMMAND;
+            d[0x0048] = (s, h, b) => HandleRaidAwareDungeonExit(s, h, b, _dungeonHandler.Handle_ENUM_CMDPACKET_EPLP_COMMAND, "eplp");
             d[0x0075] = _dungeonHandler.Handle_BOSS_DIE_CHECK;
-            d[0x007B] = _dungeonHandler.Handle_ENUM_CMDPACKET_DEATH_RESPAWN;       //123
+            d[0x007B] = (s, h, b) => HandleRaidAwareDungeonExit(s, h, b, _dungeonHandler.Handle_ENUM_CMDPACKET_DEATH_RESPAWN, "death-respawn");       //123
             d[0x00EB] = _dungeonHandler.Handle_ENUM_CMDPACKET_HELLPARTY_START;     //235
             d[0x008F] = _dungeonHandler.Handle_ENUM_CMDPACKET_CHANGE_TUTORIAL_FLAG; //143
             d[0x00BF] = _dungeonHandler.Handle_ENUM_CMDPACKET_DUNGEON_EVENT_STORY_PAUSE; //191
@@ -648,9 +779,9 @@ namespace DfoServer.Network
                 await _townHandler.Handle_ENUM_CMDPACKET_SET_USER_AREA(s, h, b);
                 await _expertJobStoreHandler.SendAreaStoresToAsync(s);
             };
-            d[0x0025] = _townHandler.Handle_ENUM_CMDPACKET_FINISH_LOADING;
-            d[0x002A] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
-            d[0x0084] = _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME;
+            d[0x0025] = HandleRaidAwareFinishLoading;
+            d[0x002A] = (s, h, b) => HandleRaidAwareDungeonExit(s, h, b, _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME, "giveup");
+            d[0x0084] = (s, h, b) => HandleRaidAwareDungeonExit(s, h, b, _townHandler.Handle_ENUM_CMDPACKET_GIVEUP_GAME, "back-to-village");
             d[0x00ED] = _townHandler.Handle_ENUM_CMDPACKET_TELEPORT;
             d[(ushort)CmdPacketType.PARTY_TELEPORT] =
                 _townHandler.Handle_ENUM_CMDPACKET_PARTY_TELEPORT;

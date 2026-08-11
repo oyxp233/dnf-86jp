@@ -517,7 +517,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             return Game.Premium.PremiumEffectProvider.GetCombinedEffects(connStr, accountId).ComputeBonusExp(baseMonsterExp);
         }
 
-        internal async Task HandleUseCoin(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+        internal async Task<bool> HandleUseCoin(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             // df_game_r: read = u16 targetActorId
             ushort targetId = body != null && body.Length >= 2 ? BitConverter.ToUInt16(body, 0) : session.Player.UserId;
@@ -527,7 +527,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: uid={session.Player.UserId} target={targetId} cid={characterId}");
 
             if (run == null || !session.Player.IsCurrentDungeonRun(runIdentity))
-                return;
+                return false;
 
             // 先扣复活币, 成功才发复活通知(旧实现不扣币白送复活)
             short coinSlot;
@@ -545,11 +545,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 err.WriteUInt16(targetId);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0029, err.ToArray()));
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: no coin cid={characterId}");
-                return;
+                return false;
             }
 
             if (!session.Player.IsCurrentDungeonRun(runIdentity))
-                return;
+                return false;
             DungeonRunLifecycle.CancelDeathRespawn(run);
 
             // 1. NOTI 0x0020 DIE_STATE: set_charac_live(user, 1=revive)
@@ -560,7 +560,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             noti.WriteByte(0x00);  // 86JP flag
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0020, noti.ToArray()));
             if (!session.Player.IsCurrentDungeonRun(runIdentity))
-                return;
+                return false;
 
             // 2. CMD ACK 0x0029: resultCode=1 + u16 targetActorId
             //    不补发 0x000E: 客户端使用复活币时本地已预扣显示(PR#338 实测说明), 全量列表随下次进城刷新
@@ -569,6 +569,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             ack.WriteUInt16(targetId);     // targetActorId
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0029, ack.ToArray()));
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] USE_COIN: OK cid={characterId} slot={coinSlot} remaining={coinRemaining}");
+            return true;
         }
 
         internal async Task HandleGetItem(EnhancedClientSession session, GamePacketHeader header, byte[] body)

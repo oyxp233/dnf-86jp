@@ -4,6 +4,7 @@ namespace DfoServer.Game.Dungeon
     {
         Standard = 0,
         InteractiveTraining = 1,
+        AntonRaid = 2,
     }
 
     // Immutable per-instance policy. Configuration is resolved before a run is
@@ -15,6 +16,16 @@ namespace DfoServer.Game.Dungeon
             allowsMonsterExperience: true,
             allowsMonsterDrops: true,
             allowsQuestDrops: true,
+            allowsQuestProgress: true,
+            allowsPetExperience: true,
+            allowsClearCommit: true,
+            allowsSettlement: true);
+
+        public static DungeonRewardPolicy AntonRaid { get; } = new DungeonRewardPolicy(
+            DungeonRewardPolicyKind.AntonRaid,
+            allowsMonsterExperience: true,
+            allowsMonsterDrops: false,
+            allowsQuestDrops: false,
             allowsQuestProgress: true,
             allowsPetExperience: true,
             allowsClearCommit: true,

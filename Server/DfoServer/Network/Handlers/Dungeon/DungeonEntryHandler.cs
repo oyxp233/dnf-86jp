@@ -20,6 +20,8 @@ namespace DfoServer.Network.Handlers.Dungeon
         private const int GorgeousChallengeGoldCost = 190000;
         internal const ushort StartGameResponseType = 0x000F;
         internal const byte MercenaryContentErrorCode = 0xEB;
+        private const string RaidSelectionRestrictionMessage =
+            "\u5FC5\u987B\u52A0\u5165\u653B\u575A\u961F\u5E76\u5F00\u59CB\u653B\u575A\u540E\u624D\u80FD\u8FDB\u5165\u5730\u4E0B\u57CE\u3002";
 
         private readonly DungeonSharedServices _svc;
         private readonly DungeonMapHandler _mapHandler;
@@ -33,6 +35,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal async Task HandleEnterSelectDungeon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
         {
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON: cid={session.Player.CharacterId} uid={session.Player.UserId} town={session.Player.CurTownId} area={session.Player.CurAreaId}");
+            if (!CanEnterRaidDungeonSelection(session))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"ENTER_SELECT_DUNGEON rejected by raid state: " +
+                    $"cid={session.Player.CharacterId} uid={session.Player.UserId}");
+                await SendRaidSelectionRejectedAsync(session, header.type);
+                return;
+            }
             if (_svc.MercenaryRestrictions != null
                 && !_svc.MercenaryRestrictions.CanEnterContent(session.Player.CharacterId))
             {
@@ -131,6 +142,44 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
         }
 
+        internal static bool IsRaidDungeonSelectionAllowed(
+            int listenerPort,
+            Game.Raid.RaidSnapshot raid)
+            => !GameNetworkConfig.IsRaidListener(listenerPort)
+               || raid?.State == 2;
+
+        private bool CanEnterRaidDungeonSelection(
+            EnhancedClientSession session)
+        {
+            if (session?.Player == null)
+                return false;
+            if (!GameNetworkConfig.IsRaidListener(session.ListenerPort))
+                return true;
+
+            return _svc.RaidManager != null
+                && _svc.RaidManager.TryGetByUser(
+                    session.Player.UserId,
+                    out var raid)
+                && IsRaidDungeonSelectionAllowed(
+                    session.ListenerPort,
+                    raid);
+        }
+
+        private async Task SendRaidSelectionRejectedAsync(
+            EnhancedClientSession session,
+            ushort wireType)
+        {
+            await _svc.AdmissionRejects.SendAsync(
+                session,
+                wireType,
+                DungeonAdmissionReject.InvalidSelectionState);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketType.SERVER_NOTICE_MESSAGE,
+                ServerNoticeMessageBuilder.Build(
+                    RaidSelectionRestrictionMessage)));
+        }
+
         private static DungeonSelectionContext BeginDungeonSelection(
             Game.Session.PlayerContext player)
         {
@@ -179,6 +228,16 @@ namespace DfoServer.Network.Handlers.Dungeon
             int linkedSourceDungeonId,
             DungeonRunIdentity? expectedPredecessorIdentity)
         {
+            if (!CanEnterRaidDungeonSelection(session))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON rejected by raid state: " +
+                    $"cid={session?.Player?.CharacterId} uid={session?.Player?.UserId}");
+                await SendRaidSelectionRejectedAsync(session, header.type);
+                return;
+            }
+
             var req = Network.Parsers.Dungeon.SelectDungeonRequest.Parse(body);
             var predecessorRun = session?.Player?.CurrentRun;
             var predecessorGeneration =

@@ -42,6 +42,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Game.Dungeon.TowerOfDespairProgressService TowerOfDespairProgress { get; }
         internal Game.Dungeon.TowerOfDespairRewardGrantService TowerOfDespairRewards { get; }
         internal Game.Party.PartyManager PartyManager { get; }
+        internal Game.Raid.RaidManager RaidManager { get; }
         internal Game.Session.ISessionDirectory Sessions { get; }
         internal CardRewardCoordinator CardRewards { get; }
         internal Game.Dungeon.DropService Drops { get; }
@@ -73,7 +74,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             AccountExperienceProgressService accountExperience = null,
             IMercenaryRestrictionService mercenaryRestrictions = null,
             Game.Dungeon.DungeonPersistentEffectApplicationService persistentEffects = null,
-            Game.Dungeon.DungeonInstanceRegistry instanceRegistry = null)
+            Game.Dungeon.DungeonInstanceRegistry instanceRegistry = null,
+            Game.Raid.RaidManager raidManager = null)
         {
             ReviveCoin = reviveCoin
                 ?? throw new ArgumentNullException(nameof(reviveCoin));
@@ -85,6 +87,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     "A database connection string is required.",
                     nameof(connectionString));
             PartyManager = partyManager;
+            RaidManager = raidManager;
             Sessions = sessions;
             SelectCharacterDataSource = selectCharacterDataSource
                 ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));

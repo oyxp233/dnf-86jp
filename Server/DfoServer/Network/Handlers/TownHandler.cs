@@ -49,6 +49,7 @@ namespace DfoServer.Network.Handlers
         // 可空: 会话目录(charId→session)。同屏区域查询与队员定位共用这一份注册表, 不另设区域广播器。
         private readonly Game.Session.ISessionDirectory _sessions;
         private readonly DungeonInstanceRegistry _dungeonInstances;
+        private readonly Game.Raid.RaidManager _raidManager;
 
         private readonly InventoryRefreshSender _refresh;
 
@@ -66,7 +67,8 @@ namespace DfoServer.Network.Handlers
                 partyManager,
                 sessions,
                 refresh,
-                dungeonInstances: null)
+                dungeonInstances: null,
+                raidManager: null)
         {
         }
 
@@ -76,7 +78,8 @@ namespace DfoServer.Network.Handlers
             Game.Party.PartyManager partyManager,
             Game.Session.ISessionDirectory sessions,
             InventoryRefreshSender refresh,
-            DungeonInstanceRegistry dungeonInstances)
+            DungeonInstanceRegistry dungeonInstances,
+            Game.Raid.RaidManager raidManager)
         {
             _characterRepository = characterRepository ?? throw new ArgumentNullException(nameof(characterRepository));
             _honorLevel = new HonorLevelSyncService(_characterRepository);
@@ -89,6 +92,7 @@ namespace DfoServer.Network.Handlers
             _partyManager = partyManager;          // 可空: 组队副本收尾 fan-out(跟随退出); 与副本共享同一 PartyManager
             _sessions = sessions;                  // 可空: 未注入时退化为单人(不广播)
             _dungeonInstances = dungeonInstances;
+            _raidManager = raidManager;
         }
 
         // 构建某在线会话玩家的【完整 USERINFO subtype1】(0x0002 occ1, ~1458B: 属性/装备/技能)。
@@ -194,6 +198,17 @@ namespace DfoServer.Network.Handlers
             var gotoPosX = BitConverter.ToInt16(body, 2);
             var gotoPosY = BitConverter.ToInt16(body, 4);
 
+            if (!CanChangeRaidArea(session, gotoTownId, gotoAreaId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] SET_USER_AREA rejected for non-raid member: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"current={session.Player.CurTownId}:{session.Player.CurAreaId} " +
+                    $"target={gotoTownId}:{gotoAreaId}");
+                await ChannelTownRestrictionSender.SendCurrentAreaAsync(session);
+                return;
+            }
+
             if (!GameChannelSpawnPolicy.CanEnterTown(
                     session.ListenerPort,
                     gotoTownId))
@@ -240,6 +255,28 @@ namespace DfoServer.Network.Handlers
         //   0/未设(默认)= 只 0x0017(野外, 保持既有已工作的渲染, 不回归)
         //   1 = 只 0x0018(城镇分支 count=1; 试 type→4 可邀请, 但能否触发渲染他人对象未验)
         //   2 = both(先 0x0017 渲染 + 再 0x0018 城镇登记; 最稳: 保渲染又补城镇类型)
+        private bool CanChangeRaidArea(
+            EnhancedClientSession session,
+            byte targetTownId,
+            byte targetAreaId)
+        {
+            if (!GameNetworkConfig.IsRaidListener(session.ListenerPort)
+                || session.Player.CurTownId != GameChannelSpawnPolicy.RaidTownId
+                || targetTownId != GameChannelSpawnPolicy.RaidTownId
+                || targetAreaId == session.Player.CurAreaId)
+            {
+                return true;
+            }
+
+            if (session.Player.CurAreaId == 1 && targetAreaId == 2)
+            {
+                return _raidManager != null
+                    && _raidManager.TryGetByUser(session.Player.UserId, out _);
+            }
+
+            return true;
+        }
+
         private static readonly int _coPresenceMode =
             int.TryParse(System.Environment.GetEnvironmentVariable("DFO_COPRESENCE_TOWN_INSERT"), out var m) ? m : 0;
 

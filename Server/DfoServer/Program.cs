@@ -24,6 +24,7 @@ namespace DfoServer
             ("--selftest-separate-upgrade", SelfTests.SeparateUpgradeSelfTest.Run),
             ("--selftest-avatar-compound", SelfTests.AvatarCompoundSelfTest.Run),
             ("--selftest-cerashop", SelfTests.CeraShopSelfTest.Run),
+            ("--selftest-raid-protocol", SelfTests.RaidProtocolSelfTest.Run),
             ("--selftest-pet-consumable", SelfTests.PetConsumableSelfTest.Run),
             ("--selftest-titlebook-item-codec", SelfTests.LegacyTitleBookItemCodecSelfTest.Run),
             ("--selftest-npc-material-exchange-price", SelfTests.NpcMaterialExchangePriceSelfTest.Run),

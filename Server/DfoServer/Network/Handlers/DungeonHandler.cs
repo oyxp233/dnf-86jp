@@ -49,6 +49,7 @@ namespace DfoServer.Network.Handlers
                 questDropService,
                 accountExperience,
                 mercenaryRestrictions,
+                null,
                 null)
         {
         }
@@ -66,7 +67,8 @@ namespace DfoServer.Network.Handlers
             Game.Quests.QuestDropService questDropService = null,
             Game.Accounts.AccountExperienceProgressService accountExperience = null,
             IMercenaryRestrictionService mercenaryRestrictions = null,
-            Game.Dungeon.DungeonInstanceRegistry instanceRegistry = null)
+            Game.Dungeon.DungeonInstanceRegistry instanceRegistry = null,
+            Game.Raid.RaidManager raidManager = null)
         {
             _services = new DungeonSharedServices(
                 reviveCoinService,
@@ -81,7 +83,8 @@ namespace DfoServer.Network.Handlers
                 accountExperience,
                 mercenaryRestrictions,
                 persistentEffects,
-                instanceRegistry);
+                instanceRegistry,
+                raidManager);
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
             _settlement = new DungeonSettlementHandler(_services, _entry);
@@ -134,6 +137,9 @@ namespace DfoServer.Network.Handlers
             => _combat.HandleDeathRespawn(session, header, body);
 
         public Task Handle_ENUM_CMDPACKET_USE_COIN(EnhancedClientSession session, GamePacketHeader header, byte[] body)
+            => _combat.HandleUseCoin(session, header, body);
+
+        public Task<bool> HandleUseCoinWithResultAsync(EnhancedClientSession session, GamePacketHeader header, byte[] body)
             => _combat.HandleUseCoin(session, header, body);
 
         public Task Handle_ENUM_CMDPACKET_GET_ITEM(EnhancedClientSession session, GamePacketHeader header, byte[] body)

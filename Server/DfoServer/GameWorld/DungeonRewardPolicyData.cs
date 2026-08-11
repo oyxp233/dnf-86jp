@@ -19,6 +19,9 @@ namespace DfoServer.GameWorld
             if (dungeonId <= 0)
                 return DungeonRewardPolicy.Standard;
 
+            if (IsAntonRaidDungeonId(dungeonId))
+                return DungeonRewardPolicy.AntonRaid;
+
             return Cache.GetOrAdd(dungeonId, ResolveUncached);
         }
 
@@ -57,6 +60,12 @@ namespace DfoServer.GameWorld
                     $"dungeon={dungeonId}: {ex.Message}");
                 return DungeonRewardPolicy.Standard;
             }
+        }
+
+        internal static bool IsAntonRaidDungeonId(int dungeonId)
+        {
+            return (dungeonId >= 210 && dungeonId <= 215)
+                || (dungeonId >= 218 && dungeonId <= 224);
         }
 
         internal static bool IsInteractiveTrainingConfiguration(

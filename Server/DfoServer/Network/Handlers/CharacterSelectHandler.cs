@@ -287,6 +287,14 @@ namespace DfoServer.Network.Handlers
                         {
                             _honorLevel.ApplyToSubtype0Tail(tail, session.Account.AccountId, null);
                         }
+                        if (GameNetworkConfig.IsRaidListener(session.ListenerPort))
+                        {
+                            tail = tail ?? new UserInfoMinimumTailSnapshot();
+                            tail.ChannelDisplayMode = 5;
+                            tail.ChannelType = GameNetworkConfig.ResolveLoginEnvironment(session.ListenerPort);
+                            tail.ChannelId = (ushort)GameNetworkConfig
+                                .ResolveGameChannel(session.ListenerPort).ChannelId;
+                        }
                         if (tail != null)
                         {
                             record.Subtype0Tail = tail;

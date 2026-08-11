@@ -56,6 +56,8 @@ namespace DfoServer.Network
     {
         public const byte Channel100TownId = 17;
         public const byte Channel100SpawnAreaId = 4;
+        public const byte RaidTownId = 19;
+        public const byte NormalTownFallbackId = 20;
 
         public static GameChannelSpawn Resolve(
             int listenerGamePort,
@@ -67,6 +69,8 @@ namespace DfoServer.Network
             var townId = persistedTownId > 0
                 ? persistedTownId
                 : 1;
+            if (townId == RaidTownId)
+                townId = NormalTownFallbackId;
             var gate = Town.GetCeraRoomInfo(townId);
             if (gate.Town <= 0)
                 throw new InvalidOperationException(
@@ -87,6 +91,24 @@ namespace DfoServer.Network
             out GameChannelSpawn spawn)
         {
             spawn = null;
+            if (GameNetworkConfig.IsRaidListener(listenerGamePort))
+            {
+                var raidGate = Town.GetCeraRoomInfo(RaidTownId);
+                if (raidGate.Town <= 0)
+                    throw new InvalidOperationException(
+                        $"Town {RaidTownId} has no Seria-room gate.");
+
+                spawn = new GameChannelSpawn(
+                    raidGate.Town,
+                    raidGate.Area,
+                    raidGate.X,
+                    raidGate.Y,
+                    direction: 5,
+                    areaState: 3,
+                    isTransient: true);
+                return true;
+            }
+
             if (!GameNetworkConfig.IsChannel100Listener(listenerGamePort))
                 return false;
 
@@ -114,12 +136,17 @@ namespace DfoServer.Network
         public static bool CanEnterTown(
             int listenerGamePort,
             int targetTownId)
-            => !GameNetworkConfig.IsChannel100Listener(listenerGamePort)
-               || targetTownId == Channel100TownId;
+        {
+            if (GameNetworkConfig.IsRaidListener(listenerGamePort))
+                return targetTownId == RaidTownId;
+            return !GameNetworkConfig.IsChannel100Listener(listenerGamePort)
+                   || targetTownId == Channel100TownId;
+        }
 
         public static bool ShouldPersistPosition(int listenerGamePort)
         {
-            return !GameNetworkConfig.IsChannel100Listener(listenerGamePort);
+            return !GameNetworkConfig.IsChannel100Listener(listenerGamePort)
+                   && !GameNetworkConfig.IsRaidListener(listenerGamePort);
         }
     }
 }

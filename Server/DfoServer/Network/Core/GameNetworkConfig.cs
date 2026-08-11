@@ -9,6 +9,7 @@ namespace DfoServer.Network
         public const int NormalChannelIndex = 11;
         public const int Channel100Index = 100;
         public const int FreeDuelChannelIndex = 68;
+        public const int RaidChannelIndex = 200;
         public const string ChannelName = "ch.11";
         public const int ChannelServerIndex = 1;
         public const int ChannelIndex = NormalChannelIndex;
@@ -17,10 +18,12 @@ namespace DfoServer.Network
         public const int Channel100GamePort = 10161;
         public const int Channel100ProxyGamePort = 10162;
         public const int FreeDuelGamePort = 10068;
+        public const int RaidGamePort = 10200;
         public const string FreeDuelListenerEnvironmentVariable =
             "DFO_FREE_DUEL_CHANNEL_LISTENER";
         public const byte GeneralChannelEnvironment = 0x01;
         public const byte FreeDuelChannelEnvironment = 0x0D;
+        public const byte RaidChannelEnvironment = 0x17;
         public const int InitialUdpPort1 = 12311;
         public const int InitialUdpPort2 = 12312;
         public const int LoginChannelPort = 10128;
@@ -73,7 +76,11 @@ namespace DfoServer.Network
                 new GameChannelEndpoint(
                     Channel100Index,
                     Channel100GamePort,
-                    channel100ListenerPort)
+                    channel100ListenerPort),
+                new GameChannelEndpoint(
+                    RaidChannelIndex,
+                    RaidGamePort,
+                    RaidGamePort)
             };
 
             if (includeFreeDuel)
@@ -119,10 +126,21 @@ namespace DfoServer.Network
             => listenerGamePort == Channel100GamePort
                || listenerGamePort == Channel100ProxyGamePort;
 
+        public static bool IsRaidChannel(int channelId)
+            => channelId == RaidChannelIndex;
+
+        public static bool IsRaidListener(int listenerGamePort)
+            => listenerGamePort == RaidGamePort;
+
         public static byte ResolveLoginEnvironment(int listenerGamePort)
-            => IsFreeDuelListener(listenerGamePort)
+        {
+            if (IsRaidListener(listenerGamePort))
+                return RaidChannelEnvironment;
+
+            return IsFreeDuelListener(listenerGamePort)
                 ? FreeDuelChannelEnvironment
                 : GeneralChannelEnvironment;
+        }
 
         public static void Configure(string[] args)
         {

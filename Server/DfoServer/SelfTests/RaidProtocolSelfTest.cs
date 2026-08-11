@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using DfoServer.Game.Raid;
+using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
 using DfoServer.Network;
+using DfoServer.Network.Builders;
 using DfoServer.Network.Builders.Raid;
 using DfoServer.Network.Handlers;
 using DfoServer.Network.Handlers.Dungeon;
@@ -15,6 +18,41 @@ namespace DfoServer.SelfTests
         public static int Run()
         {
             var failures = 0;
+            var eventTemplate = new List<SelectCharacterPacketTemplate>
+            {
+                new SelectCharacterPacketTemplate
+                {
+                    Kind = SelectCharacterPacketTemplateKind.Raw,
+                    Command = 0x00,
+                    Type = 0x006C,
+                    OccurrenceIndex = 0,
+                },
+            };
+            var eventDataSource = new FixedSelectCharacterDataSource();
+            var firstEventBody = SelectCharacterPacketBuilder.BuildPacketStream(
+                    eventDataSource,
+                    0,
+                    0,
+                    eventTemplate)
+                .First()
+                .Skip(15)
+                .ToArray();
+            var secondEventBody = SelectCharacterPacketBuilder.BuildPacketStream(
+                    eventDataSource,
+                    0,
+                    0,
+                    eventTemplate)
+                .First()
+                .Skip(15)
+                .ToArray();
+            Check("character init exposes the active RAID event",
+                firstEventBody.Length == 17
+                && secondEventBody.SequenceEqual(firstEventBody)
+                && BitConverter.ToUInt16(firstEventBody, 0) == 1
+                && BitConverter.ToUInt16(firstEventBody, 2) == 0x00B5
+                && firstEventBody.Skip(4).All(value => value == 0),
+                ref failures);
+
             Check("Anton dungeon set is recognized",
                 RaidHandler.IsAntonRaidDungeon(210)
                 && RaidHandler.IsAntonRaidDungeon(224)
@@ -182,6 +220,18 @@ namespace DfoServer.SelfTests
             Console.WriteLine($"[{(condition ? "OK" : "FAIL")}] {name}");
             if (!condition)
                 failures++;
+        }
+
+        private sealed class FixedSelectCharacterDataSource : ISelectCharacterDataSource
+        {
+            public SelectCharacterDataSnapshot Load(int characterId, int accountId)
+                => new SelectCharacterDataSnapshot();
+
+            public int GetSeedCharacterId() => 0;
+
+            public void InitializeNewCharacter(int characterId, int accountId, byte job)
+            {
+            }
         }
     }
 }

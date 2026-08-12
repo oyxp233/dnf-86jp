@@ -59,6 +59,30 @@ namespace DfoServer.SelfTests
                 && !RaidHandler.IsAntonRaidDungeon(217),
                 ref failures);
 
+            var passiveObjectStartMap = DungeonNotificationBuilder.BuildStartMap(
+                new Dungeon.MazeSumInfo
+                {
+                    Index = 1,
+                    X = 0,
+                    Y = 0,
+                    Monsters = new List<Dungeon.MonsterSumInfo>(),
+                },
+                firstMonsterSequence: 0,
+                ridableEntries: new[]
+                {
+                    new DfoServer.Game.Dungeon.RidableObjectSpawnEntry
+                    {
+                        ObjectIndex = 18865,
+                        PosX = 100,
+                        PosY = 200,
+                        Faction = 0,
+                        SpawnMode = 1,
+                    },
+                });
+            Check("START_MAP writes randomized object spawn mode at record +16",
+                passiveObjectStartMap.Length == 42
+                && BitConverter.ToInt32(passiveObjectStartMap, 37) == 1,
+                ref failures);
             var raidClock = 0L;
             var raidManager = new RaidManager(() => raidClock);
             var timeoutLeader = new RaidMember
@@ -136,6 +160,8 @@ namespace DfoServer.SelfTests
                 UserId = 1002,
                 CharacterId = 1002,
                 NameBytes = Encoding.UTF8.GetBytes("2001"),
+                Job = 3,
+                GrowType = 0x21,
                 PartyIndex = 3,
             };
             var title = Encoding.UTF8.GetBytes("Raid: 2001");
@@ -161,6 +187,14 @@ namespace DfoServer.SelfTests
                 && BitConverter.ToUInt32(modify, 8) == 1002,
                 ref failures);
 
+            var membersUpdate = RaidPacketBuilder.BuildRaidMembersUpdate(
+                1002, new[] { member });
+            Check("RAID member carries base job and full awakening type",
+                membersUpdate.Length > 27
+                && BitConverter.ToUInt32(membersUpdate, 23) == 3
+                && membersUpdate[27] == 0x21,
+                ref failures);
+
             var costs = RaidPacketBuilder.BuildEntryCostInfo(new[]
             {
                 new RaidEntryCostStatus { UserId = 1002, Ready = true, OwnedCount = 3 },
@@ -173,6 +207,11 @@ namespace DfoServer.SelfTests
 
             try
             {
+                Check("Anton randomized objects use PVF template categories",
+                    DungeonRandomizedObjectTemplateCatalog.ResolveSpawnMode(18865) == 1
+                    && DungeonRandomizedObjectTemplateCatalog.ResolveSpawnMode(58530) == 0,
+                    ref failures);
+
                 var energyMaze = Dungeon.GetDungeonDefaultMaze(218);
                 var energyRooms = Dungeon.GetDungeonRoomCoordinates(218, 0, energyMaze);
                 foreach (var room in energyRooms)

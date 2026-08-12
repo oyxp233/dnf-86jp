@@ -9,6 +9,8 @@ namespace DfoServer.Game.Raid
         public uint CharacterId { get; init; }
         public Guid SessionId { get; init; }
         public byte[] NameBytes { get; init; } = Array.Empty<byte>();
+        public byte Job { get; init; }
+        public byte GrowType { get; init; }
         public ushort PartyIndex { get; internal set; }
 
         internal RaidMember Clone()
@@ -19,6 +21,8 @@ namespace DfoServer.Game.Raid
                 CharacterId = CharacterId,
                 SessionId = SessionId,
                 NameBytes = (byte[])NameBytes.Clone(),
+                Job = Job,
+                GrowType = GrowType,
                 PartyIndex = PartyIndex,
             };
         }

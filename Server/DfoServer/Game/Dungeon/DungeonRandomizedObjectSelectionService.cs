@@ -59,6 +59,7 @@ namespace DfoServer.Game.Dungeon
                         PosX = item.PosX,
                         PosY = item.PosY,
                         Faction = item.Faction,
+                        SpawnMode = DungeonRandomizedObjectTemplateCatalog.ResolveSpawnMode(item.ObjectIndex),
                         MapX = checked((byte)item.MapX),
                         MapY = checked((byte)item.MapY),
                         HasMinimapIcon = group.MinimapIcon.HasValue,

@@ -175,7 +175,7 @@ namespace DfoServer.Network.Builders
                     writer.WriteInt32(r.PosY);
                     writer.WriteInt32(r.ObjectIndex);
                     writer.WriteInt32(r.Faction);
-                    writer.WriteInt32(0);
+                    writer.WriteInt32(r.SpawnMode);
                 }
             }
             else

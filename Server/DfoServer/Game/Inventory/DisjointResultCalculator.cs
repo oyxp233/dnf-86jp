@@ -23,6 +23,19 @@ namespace DfoServer.Game.Inventory
             return result;
         }
 
+        internal static List<DisjointMaterialResult> CalculateEquipmentSoulResults(
+            ItemMetadata metadata)
+        {
+            var config = DisjointConfigProvider.LoadSystemDisjoint();
+            LogConfigSummaryOnce(config);
+            var result = new List<DisjointMaterialResult>();
+
+            // Only [additional result expand] equipment souls are shared by
+            // system and player disjoint machines.
+            AddExpandResult(config, metadata, result);
+            return result;
+        }
+
         private static void LogConfigSummaryOnce(DisjointFile config)
         {
             if (LoggedConfigSummary || config == null)

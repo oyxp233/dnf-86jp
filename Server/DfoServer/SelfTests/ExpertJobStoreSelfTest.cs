@@ -592,6 +592,17 @@ namespace DfoServer.SelfTests
             var testMetadata = ItemMetadataResolver.Resolve(testEquipmentId);
             Check("machine disjoint test equipment resolves from current PVF",
                 testMetadata != null && testMetadata.ItemKind == "equipment", ref failures);
+            var equipmentSoulRule = DisjointConfigProvider.LoadSystemDisjoint()
+                .GetExpandResult(testMetadata?.Rarity ?? -1);
+            var equipmentSoulItemId = equipmentSoulRule?.ItemTemplateId ?? 0;
+            var equipmentSoulResults =
+                DisjointResultCalculator.CalculateEquipmentSoulResults(testMetadata);
+            Check("shared disjoint layer contains only the PVF equipment soul",
+                equipmentSoulRule != null
+                && equipmentSoulRule.Enabled
+                && equipmentSoulResults.Count == 1
+                && equipmentSoulResults[0].ItemTemplateId == equipmentSoulItemId,
+                ref failures);
             var extractionInventory = new InventoryService(990513, 990513);
             extractionInventory.SetItem(InventoryListType.Main, 3, new ItemCore
             {
@@ -908,6 +919,10 @@ namespace DfoServer.SelfTests
                 && operationResult.DisjointResult.Materials.Count > 0
                 && operationResult.DisjointResult.Materials.All(material =>
                     selfInventory.CountMainItem(material.ItemTemplateId) >= material.Count)
+                && operationResult.DisjointResult.Materials.Any(material =>
+                    material.ItemTemplateId == equipmentSoulItemId)
+                && operationResult.DisjointResult.InventoryMutations.Any(mutation =>
+                    mutation.ItemTemplateId == equipmentSoulItemId)
                 && operationResult.RequesterGold == 5000
                 && operationResult.Endurance >= 297
                 && operationResult.Endurance <= 299;

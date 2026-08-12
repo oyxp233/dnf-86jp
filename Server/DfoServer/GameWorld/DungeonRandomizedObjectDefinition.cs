@@ -85,6 +85,22 @@ namespace DfoServer.GameWorld
         internal int MapY { get; }
     }
 
+    internal static class DungeonRandomizedObjectTemplateCatalog
+    {
+        private static readonly Lazy<HashSet<int>> PassiveObjectIds =
+            new Lazy<HashSet<int>>(() =>
+            {
+                var result = new HashSet<int>();
+                var list = DungeonCatalog.LoadListFile(
+                    System.IO.Path.Combine("passiveobject", "passiveobject.lst"));
+                foreach (var entry in list.Entries)
+                    if (entry.Id > 0) result.Add(entry.Id);
+                return result;
+            });
+
+        internal static int ResolveSpawnMode(int templateId)
+            => templateId > 0 && PassiveObjectIds.Value.Contains(templateId) ? 1 : 0;
+    }
     internal static class DungeonRandomizedObjectDefinitionProjector
     {
         internal static DungeonRandomizedObjectDefinition Project(MazeInfo maze)

@@ -5,6 +5,7 @@ using DfoServer.Network;
 using DfoServer.Network.Handlers;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -21,6 +22,7 @@ namespace DfoServer.SelfTests
             var failures = 0;
             VerifyRequestParsing(ref failures);
             VerifyNotificationBody(ref failures);
+            VerifyOneToOneBodies(ref failures);
             VerifyRecipientRouting(ref failures);
 
             Console.WriteLine(
@@ -144,6 +146,45 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
+        private static void VerifyOneToOneBodies(ref int failures)
+        {
+            const uint conversationId = 0x12345678;
+            var requestBody = BuildRequestBody(
+                mode: 45,
+                targetUniqueId: 1001,
+                targetCharacterId: conversationId,
+                message: new byte[] { (byte)'h', (byte)'i' });
+            var parsed = ChatHandler.TryParseRequest(
+                requestBody,
+                out var request);
+            Check(
+                "1:1 message parses its server-assigned conversation id",
+                parsed
+                && request.Mode == 45
+                && request.TargetUniqueId == 1001
+                && request.ConversationId == conversationId
+                && request.MessageBytes.SequenceEqual(
+                    new byte[] { (byte)'h', (byte)'i' }),
+                ref failures);
+
+            var notification = ChatHandler.BuildGroupChatNotificationBody(
+                conversationId,
+                new byte[] { (byte)'m', (byte)'e' },
+                new byte[] { (byte)'h', (byte)'i' });
+            Check(
+                "1:1 notification writes conversation id, sender and message",
+                notification.SequenceEqual(
+                    new byte[]
+                    {
+                        0x78, 0x56, 0x34, 0x12,
+                        0x02, 0x00, 0x00, 0x00,
+                        (byte)'m', (byte)'e',
+                        0x02, 0x00, 0x00, 0x00,
+                        (byte)'h', (byte)'i',
+                    }),
+                ref failures);
+        }
+
         private static void VerifyRecipientRouting(ref int failures)
         {
             var sessions = new SessionDirectory();
@@ -175,7 +216,7 @@ namespace DfoServer.SelfTests
 
             var party = parties.CreateParty(ToPartyMember(sender)).Party;
             parties.Join(party.PartyId, ToPartyMember(partyPeer));
-            var handler = new ChatHandler(sessions, parties);
+            using var handler = new ChatHandler(sessions, parties);
 
             var areaRecipients = handler.ResolveRecipients(
                 sender.Session,
@@ -211,8 +252,8 @@ namespace DfoServer.SelfTests
                     targetUniqueId: 1004,
                     targetCharacterId: 1004));
             Check(
-                "whisper does not leak to another game channel",
-                HasExactly(crossChannelWhisper, sender),
+                "whisper reaches an online target across game channels",
+                HasExactly(crossChannelWhisper, sender, otherChannel),
                 ref failures);
 
             var nameFallbackWhisper = handler.ResolveRecipients(
@@ -232,6 +273,115 @@ namespace DfoServer.SelfTests
                 "unknown chat modes fail closed to sender-only",
                 HasExactly(unknownMode, sender),
                 ref failures);
+
+            var createGroupBody = new GamePacketWriter();
+            createGroupBody.WriteDstr(otherArea.Session.Player.Name);
+            handler.Handle_CREATE_GROUP(
+                    sender.Session,
+                    new GamePacketHeader { cmd = 1, type = 0x01A3 },
+                    createGroupBody.ToArray())
+                .GetAwaiter()
+                .GetResult();
+
+            var senderReceivedGroup = sender.TryReadPacket(
+                out var senderGroupPacket);
+            var peerReceivedGroup = otherArea.TryReadPacket(
+                out var peerGroupPacket);
+            Check(
+                "CREATE_GROUP notifies both participants with one conversation id",
+                senderReceivedGroup
+                && peerReceivedGroup
+                && senderGroupPacket.Type ==
+                    (ushort)NotiPacketType.CREATE_GROUP
+                && peerGroupPacket.Type ==
+                    (ushort)NotiPacketType.CREATE_GROUP
+                && IsCreateGroupBody(
+                    senderGroupPacket.Body,
+                    1,
+                    sender.Session.Player.Name,
+                    otherArea.Session.Player.Name)
+                && IsCreateGroupBody(
+                    peerGroupPacket.Body,
+                    1,
+                    otherArea.Session.Player.Name,
+                    sender.Session.Player.Name),
+                ref failures);
+
+            var conversationRecipients = handler.ResolveRecipients(
+                sender.Session,
+                new ChatMessageRequest(
+                    mode: 45,
+                    targetUniqueId: sender.Session.Player.UserId,
+                    targetCharacterId: 1,
+                    conversationId: 1,
+                    messageBytes: new byte[] { (byte)'h', (byte)'i' },
+                    targetNameBytes: Array.Empty<byte>()));
+            Check(
+                "1:1 conversation routes only to its registered peer",
+                HasExactly(conversationRecipients, sender, otherArea),
+                ref failures);
+
+            var oneToOneBody = BuildRequestBody(
+                mode: 45,
+                targetUniqueId: sender.Session.Player.UserId,
+                targetCharacterId: 1,
+                message: new byte[] { (byte)'h', (byte)'i' });
+            handler.Handle_SEND_MESSAGE(
+                    sender.Session,
+                    new GamePacketHeader { cmd = 1, type = 0x0011 },
+                    oneToOneBody)
+                .GetAwaiter()
+                .GetResult();
+            var peerReceivedMessage = otherArea.TryReadPacket(
+                out var peerMessagePacket);
+            Check(
+                "1:1 message sends the group-chat projection to its peer",
+                peerReceivedMessage
+                && peerMessagePacket.Type ==
+                    (ushort)NotiPacketType.MESSAGE_GROUP_CHAT
+                && peerMessagePacket.Body.SequenceEqual(
+                    ChatHandler.BuildGroupChatNotificationBody(
+                        1,
+                        sender.Session.Player.Name,
+                        new byte[] { (byte)'h', (byte)'i' })),
+                ref failures);
+            Check(
+                "1:1 message relies on client local echo for the sender",
+                !sender.TryReadPacket(out _),
+                ref failures);
+
+            var wrongConversationRecipients = handler.ResolveRecipients(
+                sender.Session,
+                new ChatMessageRequest(
+                    mode: 45,
+                    targetUniqueId: sender.Session.Player.UserId,
+                    targetCharacterId: 99,
+                    conversationId: 99,
+                    messageBytes: new byte[] { (byte)'h', (byte)'i' },
+                    targetNameBytes: Array.Empty<byte>()));
+            Check(
+                "1:1 conversation rejects an unrelated conversation id",
+                HasExactly(wrongConversationRecipients, sender),
+                ref failures);
+
+            sessions.UnregisterAsync(
+                    otherArea.Session.Player.CharacterId,
+                    otherArea.Session)
+                .GetAwaiter()
+                .GetResult();
+            var endedConversationRecipients = handler.ResolveRecipients(
+                sender.Session,
+                new ChatMessageRequest(
+                    mode: 45,
+                    targetUniqueId: sender.Session.Player.UserId,
+                    targetCharacterId: 1,
+                    conversationId: 1,
+                    messageBytes: new byte[] { (byte)'h', (byte)'i' },
+                    targetNameBytes: Array.Empty<byte>()));
+            Check(
+                "1:1 conversation is removed when a participant disconnects",
+                HasExactly(endedConversationRecipients, sender),
+                ref failures);
         }
 
         private static ChatMessageRequest Request(
@@ -244,6 +394,7 @@ namespace DfoServer.SelfTests
                 mode,
                 targetUniqueId,
                 targetCharacterId,
+                0,
                 new byte[] { (byte)'o', (byte)'k' },
                 targetName ?? Array.Empty<byte>());
         }
@@ -287,6 +438,23 @@ namespace DfoServer.SelfTests
             return actualIds.SetEquals(expectedIds);
         }
 
+        private static bool IsCreateGroupBody(
+            byte[] body,
+            uint conversationId,
+            byte[] recipientName,
+            byte[] peerName)
+        {
+            if (body == null || body.Length < 6)
+                return false;
+            var expected = new GamePacketWriter();
+            expected.WriteByte(0);
+            expected.WriteUInt32(conversationId);
+            expected.WriteByte(2);
+            expected.WriteDstr(recipientName);
+            expected.WriteDstr(peerName);
+            return body.SequenceEqual(expected.ToArray());
+        }
+
         private static void Check(
             string name,
             bool passed,
@@ -299,6 +467,7 @@ namespace DfoServer.SelfTests
 
         private sealed class ConnectedSession : IDisposable
         {
+            private const int GameEnvelopeHeaderSize = 15;
             private readonly TcpClient _serverSide;
 
             private ConnectedSession(
@@ -309,6 +478,7 @@ namespace DfoServer.SelfTests
                 Name = name;
                 Session = session;
                 _serverSide = serverSide;
+                _serverSide.ReceiveTimeout = 1000;
             }
 
             internal string Name { get; }
@@ -354,6 +524,71 @@ namespace DfoServer.SelfTests
                 Session.Close();
                 _serverSide.Close();
             }
+
+            internal bool TryReadPacket(out SentPacket packet)
+            {
+                packet = default;
+                try
+                {
+                    var stream = _serverSide.GetStream();
+                    var header = new byte[GameEnvelopeHeaderSize];
+                    if (!ReadExact(stream, header, 0, header.Length))
+                        return false;
+
+                    var length = (int)BitConverter.ToUInt32(header, 3);
+                    if (length < GameEnvelopeHeaderSize)
+                        return false;
+
+                    var body = new byte[length - GameEnvelopeHeaderSize];
+                    if (body.Length > 0
+                        && !ReadExact(stream, body, 0, body.Length))
+                    {
+                        return false;
+                    }
+
+                    packet = new SentPacket(
+                        BitConverter.ToUInt16(header, 1),
+                        body);
+                    return true;
+                }
+                catch (IOException)
+                {
+                    return false;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+            }
+
+            private static bool ReadExact(
+                Stream stream,
+                byte[] buffer,
+                int offset,
+                int count)
+            {
+                while (count > 0)
+                {
+                    var read = stream.Read(buffer, offset, count);
+                    if (read <= 0)
+                        return false;
+                    offset += read;
+                    count -= read;
+                }
+                return true;
+            }
+        }
+
+        private readonly struct SentPacket
+        {
+            internal SentPacket(ushort type, byte[] body)
+            {
+                Type = type;
+                Body = body ?? Array.Empty<byte>();
+            }
+
+            internal ushort Type { get; }
+            internal byte[] Body { get; }
         }
     }
 }

@@ -58,6 +58,9 @@ namespace DfoServer.Game.ExpertJob
                 }
             }
 
+            foreach (var material in DisjointResultCalculator.CalculateEquipmentSoulResults(metadata))
+                Add(result, material.ItemTemplateId, material.Count);
+
             if (isSelfService
                 && metadata.Rarity > 1
                 && config.SelfServiceItemId > 0

@@ -354,6 +354,7 @@ namespace DfoServer.Network
 
         public void Dispose()
         {
+            _chatHandler.Dispose();
             _pvpRoomHandler.Dispose();
             _partyHandler.Dispose();
         }
@@ -449,7 +450,9 @@ namespace DfoServer.Network
             d[0x000A] = _partyHandler.Handle_REQUEST_PEER;          // 10 右键同屏玩家→组队/交易邀请(按uid)→给目标发 SC 0x0007 弹框
             d[0x000B] = _partyHandler.Handle_RES_PEER;              // 11 被邀请者应答(body=邀请者uid+reqType)→组队并广播 PARTY_INFO
             // 419 creates a chat/1:1 conversation; party invites use 0x000A/0x000B.
-            d[0x01A3] = _partyHandler.Handle_CREATE_GROUP;
+            d[0x01A3] = _chatHandler.Handle_CREATE_GROUP;
+            d[(ushort)CmdPacketType.ONE_TO_ONE_CHAT_STATE] =
+                _chatHandler.Handle_ONE_TO_ONE_CHAT_STATE;
             d[0x00A6] = _partyHandler.Handle_CALL_PARTY_MEMBER_REALTIME_INFO;  // 166 请求成员实时信息(HP%)
             d[0x0079] = _partyHandler.Handle_CHANGE_HOST;           // 121 委托队长(body=1字节槽位)
             // P2P 上报类: df 只喂统计计数器, 不回包不转发。收下即忽略, 消掉 Unhandled 日志。

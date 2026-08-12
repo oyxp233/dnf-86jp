@@ -777,17 +777,19 @@ namespace DfoServer.Network.Handlers
             DungeonTownReturnAnchor returnAnchor,
             int listenerGamePort)
         {
-            if (GameChannelSpawnPolicy.TryResolveTransientSpawn(
+            // Prefer the dungeon run anchor; the transient channel spawn is only a fallback.
+            if (!returnAnchor.IsValid
+                && GameChannelSpawnPolicy.TryResolveTransientSpawn(
                     listenerGamePort,
                     out var transientSpawn))
             {
-                player.CurTownId = transientSpawn.TownId;
-                player.CurAreaId = transientSpawn.AreaId;
-                player.CurPosX = transientSpawn.X;
-                player.CurPosY = transientSpawn.Y;
-                player.CurDirection = transientSpawn.Direction;
-                player.CurAreaState = transientSpawn.AreaState;
-                return;
+                returnAnchor = new DungeonTownReturnAnchor(
+                    transientSpawn.TownId,
+                    transientSpawn.AreaId,
+                    transientSpawn.X,
+                    transientSpawn.Y,
+                    transientSpawn.Direction,
+                    transientSpawn.AreaState);
             }
 
             if (!returnAnchor.IsValid

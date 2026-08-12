@@ -32,7 +32,7 @@ namespace DfoServer.Game.Dungeon
                 try
                 {
                     LoadDropInfo();
-                    LoadEquipmentPool();
+                    _equipPool = EquipmentDropPoolProvider.GetPool();
                     LoadStackablePool();
                 }
                 catch (Exception ex)

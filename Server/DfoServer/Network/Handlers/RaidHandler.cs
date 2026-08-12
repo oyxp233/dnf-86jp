@@ -364,7 +364,9 @@ public sealed partial class RaidHandler
 			UserId = userId,
 			CharacterId = (uint)characterId,
 			SessionId = session.SessionId,
-			NameBytes = (record?.Name ?? session.Player?.Name ?? Array.Empty<byte>())
+			NameBytes = (record?.Name ?? session.Player?.Name ?? Array.Empty<byte>()),
+			Job = record?.Job ?? session.Player?.Job ?? 0,
+			GrowType = record?.GrowType ?? session.Player?.GrowType ?? 0
 		};
 		return true;
 	}
@@ -416,6 +418,8 @@ public sealed partial class RaidHandler
 			UserId = member.UserId,
 			CharacterId = member.CharacterId,
 			NameBytes = member.NameBytes,
+			Job = member.Job,
+			GrowType = member.GrowType,
 			PartyIndex = member.PartyIndex
 		};
 	}

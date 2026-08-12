@@ -8,6 +8,8 @@ namespace DfoServer.Network.Builders.Raid
         public ushort UserId { get; set; }
         public uint CharacterId { get; set; }
         public byte[] NameBytes { get; set; } = Array.Empty<byte>();
+        public byte Job { get; set; }
+        public byte GrowType { get; set; }
         public ushort PartyIndex { get; set; }
     }
 
@@ -443,8 +445,8 @@ namespace DfoServer.Network.Builders.Raid
             writer.WriteUInt16(member.UserId);
             writer.WriteUInt32(member.CharacterId);
             writer.WriteRawDstr(member.NameBytes);
-            writer.WriteUInt32(0);
-            writer.WriteByte(0);
+            writer.WriteUInt32(member.Job);
+            writer.WriteByte(member.GrowType);
             writer.WriteUInt16(member.PartyIndex);
             writer.WriteUInt32(0);
             writer.WriteUInt32(0);

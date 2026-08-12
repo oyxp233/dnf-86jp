@@ -16,6 +16,18 @@ namespace DfoServer.Game.Session
             TimeSpan.FromSeconds(5);
 
         private readonly ConcurrentDictionary<int, EnhancedClientSession> _byCharacterId = new ConcurrentDictionary<int, EnhancedClientSession>();
+        private readonly Func<byte, byte, bool> _isShareableTownArea;
+
+        public SessionDirectory()
+            : this(IsShareableTownArea)
+        {
+        }
+
+        internal SessionDirectory(Func<byte, byte, bool> isShareableTownArea)
+        {
+            _isShareableTownArea = isShareableTownArea
+                ?? throw new ArgumentNullException(nameof(isShareableTownArea));
+        }
 
         public event Func<int, EnhancedClientSession, Task> SessionEnding;
 
@@ -183,6 +195,11 @@ namespace DfoServer.Game.Session
             int excludeCharacterId,
             int listenerPort = 0)
         {
+            // The Cera room is private per character. Connections may share
+            // the same town/area ids without occupying one shared room.
+            if (!_isShareableTownArea(townId, areaId))
+                return Array.Empty<EnhancedClientSession>();
+
             var result = new List<EnhancedClientSession>();
             foreach (var kvp in _byCharacterId)
             {

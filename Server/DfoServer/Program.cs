@@ -94,6 +94,7 @@ namespace DfoServer
             ("--selftest-other-user-info", SelfTests.OtherUserInfoSelfTest.Run),
             ("--selftest-other-user-info-protocol", SelfTests.OtherUserInfoProtocolSelfTest.Run),
             ("--selftest-session-generation", SelfTests.SessionGenerationSelfTest.Run),
+            ("--selftest-private-town-area", SelfTests.PrivateTownAreaSelfTest.Run),
             ("--selftest-free-duel-channel", SelfTests.FreeDuelChannelSelfTest.Run),
             ("--selftest-free-duel-room-core", SelfTests.FreeDuelRoomCoreSelfTest.Run),
             ("--selftest-free-duel-selection-wiring", SelfTests.FreeDuelSelectionWiringSelfTest.Run),

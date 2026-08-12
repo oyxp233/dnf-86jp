@@ -7,6 +7,7 @@ namespace DfoServer.Game.Dungeon
         public int PosX;
         public int PosY;
         public int Faction;
+        public int SpawnMode;
         public byte MapX;
         public byte MapY;
         public bool HasMinimapIcon;

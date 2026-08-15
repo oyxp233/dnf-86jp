@@ -160,7 +160,7 @@ namespace DfoServer.SelfTests
 
                 var terminalOffset = 0;
                 var resultState = packets[terminalOffset++];
-                if (resultState.Key != NotiPacketType.RAID_RESULT_STATE
+                if (resultState.Key != (NotiPacketType)AntonRaidPacketType.RAID_RESULT_STATE
                     || resultState.Value.Length != 2
                     || resultState.Value[0] != 0
                     || resultState.Value[1] != 7)

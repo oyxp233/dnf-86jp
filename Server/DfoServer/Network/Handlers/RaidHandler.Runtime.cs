@@ -238,7 +238,7 @@ using System;using System.Collections.Generic;using System.Threading.Tasks;using
 	if (failed.PhaseIndex == 0)
 	{
 		packets.Add(new KeyValuePair<NotiPacketType, byte[]>(
-			NotiPacketType.RAID_RESULT_STATE,
+			(NotiPacketType)AntonRaidPacketType.RAID_RESULT_STATE,
 			RaidPacketBuilder.BuildRaidResultState(failed: true, stage: 7)));
 		packets.Add(new KeyValuePair<NotiPacketType, byte[]>(
 			NotiPacketType.RAID_RESULT,
@@ -253,7 +253,7 @@ using System;using System.Collections.Generic;using System.Threading.Tasks;using
 	}
 
 	packets.Add(new KeyValuePair<NotiPacketType, byte[]>(
-		NotiPacketType.RAID_RESULT_STATE,
+		(NotiPacketType)AntonRaidPacketType.RAID_RESULT_STATE,
 		RaidPacketBuilder.BuildRaidResultState(failed: true, stage: 7)));
 	packets.Add(new KeyValuePair<NotiPacketType, byte[]>(
 		NotiPacketType.RAID_RESULT,

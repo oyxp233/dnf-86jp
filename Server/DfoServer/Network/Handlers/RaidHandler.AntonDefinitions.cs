@@ -2,6 +2,12 @@ using System.Collections.Generic;
 
 namespace DfoServer.Network.Handlers;
 
+internal enum AntonRaidPacketType : ushort
+{
+	// DNF.exe registers 0x0288 to the raid result-state parser (sub_D85950).
+	RAID_RESULT_STATE = 0x0288, // 648
+}
+
 public sealed partial class RaidHandler
 {
 	private const uint AttackSeconds = 2400u;

@@ -27,6 +27,8 @@ namespace DfoServer.Network.Handlers
         private readonly ExpertJobOperationCoordinator _expertJobOperations;
         private readonly MonsterCardBindService _monsterCardBindService;
         private readonly MonsterCardUpgradeService _monsterCardUpgradeService;
+        private readonly Game.TitleBook.TitleBookAchievementProgressBatcher
+            _titleBookAchievementProgressBatcher;
 
         public string ProtocolName => "GameProtocol";
 
@@ -59,6 +61,9 @@ namespace DfoServer.Network.Handlers
                 ?? throw new ArgumentNullException(nameof(expertJobOperations));
             _monsterCardBindService = new MonsterCardBindService();
             _monsterCardUpgradeService = new MonsterCardUpgradeService();
+            _titleBookAchievementProgressBatcher =
+                new Game.TitleBook.TitleBookAchievementProgressBatcher(
+                    FlushUseItemAchievementProgressAsync);
         }
 
         public static (int characterId, int accountId) ResolveOwner(EnhancedClientSession session)

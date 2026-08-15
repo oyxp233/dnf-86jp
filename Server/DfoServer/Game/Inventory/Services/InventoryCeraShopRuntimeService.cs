@@ -182,6 +182,20 @@ namespace DfoServer.Game.Inventory
                     couponId,
                     out result);
 
+            if (AvatarInventoryExpansionRule.TryResolveTargetExpansion(itemTemplateId, out var avatarExpansionTarget))
+                return TryBuyAvatarInventoryExpansion(
+                    inventory,
+                    itemTemplateId,
+                    buyCount,
+                    paymentMode,
+                    totalGoldCost,
+                    totalCeraCost,
+                    ceraMode,
+                    couponId,
+                    avatarExpansionTarget,
+                    out result,
+                    out failure);
+
             if (string.Equals(metadata.ItemKind, "special", StringComparison.Ordinal))
                 return false;
 
@@ -560,6 +574,86 @@ namespace DfoServer.Game.Inventory
             foreach (var cost in costMutations)
                 result.ExtraResults.Add(cost);
 
+            return true;
+        }
+
+        private static bool TryBuyAvatarInventoryExpansion(
+            InventoryService inventory,
+            int itemTemplateId,
+            int buyCount,
+            int paymentMode,
+            int totalGoldCost,
+            int totalCeraCost,
+            CeraPayMode ceraMode,
+            int couponId,
+            ushort targetExpansion,
+            out InventoryMutationResult result,
+            out CeraShopPurchaseFailure failure)
+        {
+            result = null;
+            failure = CeraShopPurchaseFailure.Unknown;
+            var currentExpansion = inventory.GetListParam16(InventoryListType.Avatar);
+            if (buyCount != 1
+                || paymentMode != 0
+                || !AvatarInventoryExpansionRule.CanApply(currentExpansion, targetExpansion))
+            {
+                FileLogger.Log(
+                    $"[CeraShopRuntime] avatar inventory expansion rejected cid={inventory.CharacterId} " +
+                    $"item=0x{itemTemplateId:X8} current={currentExpansion} target={targetExpansion} " +
+                    $"buyCount={buyCount} paymentMode={paymentMode}");
+                return false;
+            }
+
+            if (!TrySpendPaymentAndApplyDbAction(
+                    inventory,
+                    totalGoldCost,
+                    totalCeraCost,
+                    ceraMode,
+                    (connection, transaction) =>
+                    {
+                        InventoryContainerStateRepository.UpsertCharacterContainerState(
+                            connection,
+                            transaction,
+                            inventory.CharacterId,
+                            InventoryListType.Avatar,
+                            targetExpansion);
+                        return true;
+                    },
+                    out var payment))
+            {
+                if (payment.Failure == CeraShopPaymentFailure.InsufficientCera)
+                    failure = CeraShopPurchaseFailure.InsufficientCera;
+                return false;
+            }
+
+            var costMutations = new List<InventoryMutationResult>();
+            if (!ApplyInventoryCosts(inventory, totalGoldCost, couponId, costMutations))
+                return false;
+
+            inventory.SetListParam16(InventoryListType.Avatar, targetExpansion);
+            result = new InventoryMutationResult
+            {
+                ListType = InventoryListType.Avatar,
+                SlotIndex = -1,
+                ItemTemplateId = itemTemplateId,
+                RemainingStackCount = targetExpansion,
+                InstanceValue = AvatarInventoryExpansionRule.BaseCapacity + targetExpansion,
+                UpdatedGold = payment.NewGold,
+                UpdatedCoin = payment.NewCera,
+                UpdatedTokenCera = payment.NewTokenCera,
+                UpdatedHappyTokenCera = payment.NewHappyTokenCera,
+                GoldSpent = totalGoldCost > 0,
+                ConsumedOnPurchase = true,
+                RequestedCount = 1,
+                AppliedCount = 1,
+            };
+            foreach (var cost in costMutations)
+                result.ExtraResults.Add(cost);
+
+            FileLogger.Log(
+                $"[CeraShopRuntime] avatar inventory expanded cid={inventory.CharacterId} " +
+                $"item=0x{itemTemplateId:X8} expansion={currentExpansion}->{targetExpansion} " +
+                $"capacity={AvatarInventoryExpansionRule.BaseCapacity + targetExpansion}");
             return true;
         }
 

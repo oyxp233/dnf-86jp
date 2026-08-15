@@ -142,6 +142,25 @@ namespace DfoServer.Network.Handlers
             if (runtimeInventoryDirty && !InventoryPersistenceService.SaveDirty(lease))
                 FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: SaveDirty failed cid={cid} aid={aid}");
 
+            var refreshAvatarInventory = false;
+            foreach (var result in results)
+            {
+                foreach (var updateResult in EnumerateResultGroup(result))
+                {
+                    if (updateResult.ConsumedOnPurchase
+                        && updateResult.ListType == InventoryListType.Avatar)
+                        refreshAvatarInventory = true;
+                }
+            }
+
+            // The cera-shop success handler rebuilds its visible product list immediately.
+            // Publish the new avatar expansion value first so that rebuild selects the next stage.
+            if (refreshAvatarInventory)
+            {
+                await SendItemListRefresh(session, cid, aid, InventoryListType.Avatar);
+                FileLogger.Log($"[{ProtocolName}] CERA_SHOP_BUY: avatar inventory expansion ITEM_LIST refresh sent before purchase ACK");
+            }
+
             foreach (var item in successItems)
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(

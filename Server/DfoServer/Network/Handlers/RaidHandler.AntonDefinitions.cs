@@ -5,8 +5,14 @@ namespace DfoServer.Network.Handlers;
 public sealed partial class RaidHandler
 {
 	private const uint AttackSeconds = 2400u;
+	private const uint PhaseTwoTestAttackSeconds = 2400u;
 	private const uint AttackTimerType = 0u;
 	private const uint AttackTimerDungeonId = 0u;
+
+	// RAID_MEMBER_STATE values decoded by the client: 0=disconnected, 1=alive, 2=dead.
+	internal const byte RaidMemberStateDisconnected = 0;
+	internal const byte RaidMemberStateAlive = 1;
+	internal const byte RaidMemberStateDead = 2;
 
 	internal const uint AntonFirstDungeonHpSymbolId = 50u;
 

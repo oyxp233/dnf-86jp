@@ -87,7 +87,7 @@ public sealed partial class RaidHandler
 					// its two-hour cooldown until it actually extends the phase timer.
 					bool effectApplied = !increasesTime || _raids.TryExtendPhaseTime(
 						raid.RaidId,
-						AttackSeconds,
+						(raid.PhaseIndex == 1 ? PhaseTwoTestAttackSeconds : AttackSeconds),
 						(uint)config.EffectValue,
 						out extendedTimeRaid,
 						out extendedRemainingSeconds);

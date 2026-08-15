@@ -102,10 +102,11 @@ namespace DfoServer.SelfTests
             {
                 raidClock = 2_400_000;
                 return raidManager.TryFailPhase(timeoutRaid.RaidId, 0, out var failedRaid)
-                    && failedRaid.State == 4
-                    && failedRaid.StateArgument == 1
+                    && failedRaid.State == 1
+                    && failedRaid.StateArgument == 0
                     && failedRaid.PhaseIndex == 0
                     && failedRaid.PhaseClearTimeSeconds == 2400
+                    && HasValidTimeoutTerminalPackets(failedRaid, expectPhaseOneSymbol: true)
                     && !raidManager.TryFailPhase(timeoutRaid.RaidId, 0, out _);
             }
 
@@ -134,11 +135,60 @@ namespace DfoServer.SelfTests
             {
                 phaseTwoClock = 2_400_000;
                 return phaseTwoManager.TryFailPhase(phaseTwoRaid.RaidId, 1, out var failedRaid)
-                    && failedRaid.State == 4
-                    && failedRaid.StateArgument == 1
+                    && failedRaid.State == 1
+                    && failedRaid.StateArgument == 0
                     && failedRaid.PhaseIndex == 1
                     && failedRaid.PhaseClearTimeSeconds == 2400
+                    && HasValidTimeoutTerminalPackets(failedRaid, expectPhaseOneSymbol: false)
                     && !phaseTwoManager.TryFailPhase(phaseTwoRaid.RaidId, 1, out _);
+            }
+            bool IsSymbolPacket(KeyValuePair<NotiPacketType, byte[]> packet, uint symbol, uint value)
+            {
+                return packet.Key == NotiPacketType.RAID_SET_SYMBOL
+                    && packet.Value.Length == 12
+                    && BitConverter.ToUInt32(packet.Value, 0) == 1
+                    && BitConverter.ToUInt32(packet.Value, 4) == symbol
+                    && BitConverter.ToUInt32(packet.Value, 8) == value;
+            }
+
+            bool HasValidTimeoutTerminalPackets(RaidSnapshot failedRaid, bool expectPhaseOneSymbol)
+            {
+                var packets = RaidHandler.BuildAttackTimeoutTerminalPackets(failedRaid);
+                var expectedCount = expectPhaseOneSymbol ? 4 : 3;
+                if (packets.Count != expectedCount)
+                    return false;
+
+                var terminalOffset = 0;
+                var resultState = packets[terminalOffset++];
+                if (resultState.Key != NotiPacketType.RAID_RESULT_STATE
+                    || resultState.Value.Length != 2
+                    || resultState.Value[0] != 0
+                    || resultState.Value[1] != 7)
+                    return false;
+
+                var result = packets[terminalOffset++];
+                if (result.Key != NotiPacketType.RAID_RESULT
+                    || result.Value.Length != 21
+                    || BitConverter.ToUInt32(result.Value, 0) != 1
+                    || BitConverter.ToUInt32(result.Value, 4) != failedRaid.PhaseIndex
+                    || BitConverter.ToUInt32(result.Value, 8) != failedRaid.PhaseClearTimeSeconds
+                    || BitConverter.ToUInt32(result.Value, 12) != failedRaid.PhaseDeathCount
+                    || BitConverter.ToUInt32(result.Value, 16) != 0
+                    || result.Value[20] != 1)
+                    return false;
+
+                if (expectPhaseOneSymbol
+                    && !IsSymbolPacket(
+                        packets[terminalOffset++],
+                        RaidHandler.AntonPhaseOneFailSymbolId,
+                        1))
+                    return false;
+
+                var presentationState = packets[terminalOffset];
+                return presentationState.Key == NotiPacketType.RAID_STATE
+                    && presentationState.Value.Length == 8
+                    && BitConverter.ToUInt32(presentationState.Value, 0) == 3u
+                    && BitConverter.ToUInt32(presentationState.Value, 4) == 0u;
             }
             Check("raid dungeon selection requires an active raid",
                 DungeonEntryHandler.IsRaidDungeonSelectionAllowed(
@@ -210,9 +260,7 @@ namespace DfoServer.SelfTests
                 Check("Anton randomized objects use PVF template categories",
                     DungeonRandomizedObjectTemplateCatalog.ResolveSpawnMode(18865) == 1
                     && DungeonRandomizedObjectTemplateCatalog.ResolveSpawnMode(58530) == 0,
-                    ref failures);
-
-                var energyMaze = Dungeon.GetDungeonDefaultMaze(218);
+                    ref failures);                var energyMaze = Dungeon.GetDungeonDefaultMaze(218);
                 var energyRooms = Dungeon.GetDungeonRoomCoordinates(218, 0, energyMaze);
                 foreach (var room in energyRooms)
                 {

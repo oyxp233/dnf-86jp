@@ -652,7 +652,8 @@ namespace DfoServer.Network
         PAYBACK_CHARAC_REWARD = 0x0285, // 645
         DAILY_CHALLENGE = 0x0286, // 646
         DAILY_CHALLENGE_CLEAR_DUNGEON = 0x0287, // 647
-        DIMENSION_DUNGEON_STUDY_EVENT_INFO = 0x0288, // 648
+        // DNF.exe registers 0x0288 to the raid result-state parser (sub_D85950).
+        RAID_RESULT_STATE = 0x0288, // 648
         HONOR_LEVEL_INFO = 0x0289, // 649
         RAID_INOUT_SYSTEM = 0x028A, // 650
         FARM_EVENT_INFO = 0x028B, // 651

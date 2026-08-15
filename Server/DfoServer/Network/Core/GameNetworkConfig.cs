@@ -134,7 +134,7 @@ namespace DfoServer.Network
 
         public static byte ResolveLoginEnvironment(int listenerGamePort)
         {
-            if (IsRaidListener(listenerGamePort))
+            if (listenerGamePort == RaidGamePort)
                 return RaidChannelEnvironment;
 
             return IsFreeDuelListener(listenerGamePort)

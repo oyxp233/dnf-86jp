@@ -38,6 +38,8 @@ public sealed partial class RaidHandler
 
 	private readonly ConcurrentDictionary<uint, object> _raidRuntimeLocks = new ConcurrentDictionary<uint, object>();
 
+	private readonly ConcurrentDictionary<uint, byte> _phaseOneResetClaims = new ConcurrentDictionary<uint, byte>();
+
 	private readonly ConcurrentDictionary<uint, PhaseRewardFlow> _phaseRewardFlows = new ConcurrentDictionary<uint, PhaseRewardFlow>();
 
 	private readonly ConcurrentDictionary<(uint RaidId, byte BuffType), AntonRaidBuffActivation> _raidBuffActivations = new ConcurrentDictionary<(uint, byte), AntonRaidBuffActivation>();

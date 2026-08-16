@@ -29,19 +29,46 @@ jobs:
       - name: Fetch upstream changes
         run: git fetch upstream
 
-      - name: Merge upstream changes (excluding .github/workflows)
+      - name: Merge upstream changes (exclude .github/workflows)
         run: |
           git checkout main
-          # 执行合并，但不自动提交
+
+          # 1. 备份当前的工作流目录（如果存在）
+          if [ -d ".github/workflows" ]; then
+            cp -r .github/workflows ../workflows_backup
+            echo "Backup of .github/workflows created."
+          else
+            echo "No existing .github/workflows to backup."
+          fi
+
+          # 2. 执行合并，但不自动提交
           git merge upstream/main --allow-unrelated-histories -X ours --no-commit
 
-          # 如果有冲突或新增文件，我们强制恢复 .github/workflows 目录到合并前的状态
-          # 这样就不会引入上游的工作流文件
-          git checkout HEAD -- .github/workflows/ 2>/dev/null || true
+          # 3. 从暂存区移除 .github/workflows 目录的所有变更
+          #    这包括新增、修改或删除的文件
+          if git ls-files --stage | grep -q "^.*\t\.github/workflows/"; then
+            echo "Removing .github/workflows from staging area"
+            git rm -r --cached .github/workflows/
+          fi
 
-          # 如果该目录不存在于当前版本，则跳过
-          # 提交合并
+          # 4. 恢复我们自己的工作流目录（从备份）
+          if [ -d "../workflows_backup" ]; then
+            # 删除可能被合并改动的工作区目录
+            rm -rf .github/workflows
+            # 复制备份回来
+            cp -r ../workflows_backup .github/workflows
+            # 将恢复的目录添加到暂存区
+            git add .github/workflows/
+            echo "Restored our own .github/workflows from backup."
+          else
+            # 如果没有备份，说明之前没有该目录，确保它不被创建
+            rm -rf .github/workflows
+            # 确保暂存区也没有该目录（已经删除了）
+            echo "No previous workflows, deleted any incoming ones."
+          fi
+
+          # 5. 提交合并（此时不包含上游工作流文件）
           git commit -m "Merge upstream changes, keep our workflows" || echo "No changes to commit"
 
-          # 推送到远程
+          # 6. 推送到远程
           git push origin main

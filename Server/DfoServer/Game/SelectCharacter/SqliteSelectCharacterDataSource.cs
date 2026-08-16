@@ -139,6 +139,26 @@ namespace DfoServer.Game.SelectCharacter
             return result.Success;
         }
 
+        public IReadOnlyList<AchievementTriggerResult> TriggerUseItemAchievements(
+            int characterId,
+            int itemId,
+            int consumedCount)
+        {
+            return _titleBookMutationService.TriggerUseItemAchievements(
+                characterId,
+                itemId,
+                consumedCount);
+        }
+
+        public IReadOnlyList<AchievementTriggerResult> TriggerUseItemAchievements(
+            int characterId,
+            IEnumerable<KeyValuePair<int, int>> consumedItems)
+        {
+            return _titleBookMutationService.TriggerUseItemAchievements(
+                characterId,
+                consumedItems);
+        }
+
         public SelectCharacterDataSnapshot Load(int characterId, int accountId)
         {
             _inventoryLifecycle.DeleteExpiredRentalEquipment(characterId, accountId);

@@ -68,6 +68,9 @@ namespace DfoServer.SelfTests
             Check("Devil Contract package activates all services without an inventory item", CheckDevilContractPackage());
             Check("contract packages parse and route all services without inventory slots", CheckContractRewardRouting());
             Check("overflow reward split keeps fitting count in inventory and mails remainder", CheckOverflowRewardSplit());
+            Check("PVF exposes all 15 ordered avatar inventory expansion stages", CheckAvatarInventoryExpansionProducts());
+            Check("avatar inventory open range follows base 105 plus 7 slots per stage", CheckAvatarInventoryExpansionRanges());
+            Check("avatar inventory expansion applies on purchase without granting a bag item", CheckAvatarInventoryExpansionPurchase());
 
             Console.WriteLine($"=== result: {pass} PASS, {fail} FAIL ===");
             return fail == 0 ? 0 : 1;
@@ -514,6 +517,198 @@ ORDER BY premium_type;";
                 && overflowRewards.Count == 1
                 && overflowRewards[0].ItemTemplateId == itemId
                 && overflowRewards[0].Count == 1;
+        }
+
+        private static bool CheckAvatarInventoryExpansionProducts()
+        {
+            const int firstProductId = 102644;
+            for (var stageIndex = 0; stageIndex < AvatarInventoryExpansionRule.StageCount; stageIndex++)
+            {
+                var productId = firstProductId + stageIndex;
+                var expectedItemId = AvatarInventoryExpansionRule.FirstItemTemplateId + stageIndex;
+                var expectedTarget = (ushort)((stageIndex + 1) * AvatarInventoryExpansionRule.SlotsPerStage);
+                if (!CeraShopProductCatalog.TryResolve(productId, out var product)
+                    || product == null
+                    || product.ItemTemplateId != expectedItemId
+                    || !AvatarInventoryExpansionRule.TryResolveTargetExpansion(expectedItemId, out var target)
+                    || target != expectedTarget)
+                    return false;
+            }
+
+            return !AvatarInventoryExpansionRule.TryResolveTargetExpansion(
+                    AvatarInventoryExpansionRule.FirstItemTemplateId - 1,
+                    out _)
+                && !AvatarInventoryExpansionRule.TryResolveTargetExpansion(
+                    AvatarInventoryExpansionRule.FirstItemTemplateId + AvatarInventoryExpansionRule.StageCount,
+                    out _);
+        }
+
+        private static bool CheckAvatarInventoryExpansionRanges()
+        {
+            var baseRange = ItemSlotBoundService.GetAvatarOpenRange(0);
+            var stage1Range = ItemSlotBoundService.GetAvatarOpenRange(AvatarInventoryExpansionRule.SlotsPerStage);
+            var maxRange = ItemSlotBoundService.GetAvatarOpenRange(AvatarInventoryExpansionRule.MaxExpansion);
+            return baseRange.Start == InventoryService.AvatarSlotStart
+                && baseRange.End == 104
+                && baseRange.Count == AvatarInventoryExpansionRule.BaseCapacity
+                && stage1Range.End == 111
+                && stage1Range.Count == AvatarInventoryExpansionRule.BaseCapacity + AvatarInventoryExpansionRule.SlotsPerStage
+                && maxRange.End == InventoryService.AvatarSlotEnd
+                && maxRange.Count == AvatarInventoryExpansionRule.MaxCapacity
+                && AvatarInventoryExpansionRule.CanApply(0, 7)
+                && AvatarInventoryExpansionRule.CanApply(98, 105)
+                && !AvatarInventoryExpansionRule.CanApply(0, 14)
+                && !AvatarInventoryExpansionRule.CanApply(7, 7);
+        }
+
+        private static bool CheckAvatarInventoryExpansionPurchase()
+        {
+            const int accountId = 903051;
+            const int characterId = 903052;
+            const int stage1ProductId = 102644;
+            const int stage2ProductId = 102645;
+            const int stage3ProductId = 102646;
+            var databasePath = Path.Combine(
+                Path.GetTempPath(),
+                "cerashop-avatar-inventory-expansion-" + Guid.NewGuid().ToString("N") + ".db");
+            var previousDatabasePath = Environment.GetEnvironmentVariable("INVENTORY_DATABASE_PATH");
+
+            try
+            {
+                if (!CeraShopProductCatalog.TryResolve(stage1ProductId, out var stage1Product)
+                    || !CeraShopProductCatalog.TryResolve(stage2ProductId, out var stage2Product)
+                    || stage1Product == null
+                    || stage2Product == null
+                    || stage1Product.CoinPrice <= 0
+                    || stage2Product.CoinPrice <= 0)
+                    return false;
+
+                var initialCera = stage1Product.CoinPrice + stage2Product.CoinPrice + 100;
+                var connectionString = SqliteDatabaseBootstrap.Initialize(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    using (var command = connection.CreateCommand())
+                    {
+                        command.CommandText = @"
+INSERT INTO accounts(account_id, m_id, password_hash, cera)
+VALUES(@accountId, 'cerashop-avatar-expansion-selftest', '', @cera);
+INSERT INTO characters(character_id, account_id, name)
+VALUES(@characterId, @accountId, 'cerashop-avatar-expansion');";
+                        command.Parameters.AddWithValue("@accountId", accountId);
+                        command.Parameters.AddWithValue("@characterId", characterId);
+                        command.Parameters.AddWithValue("@cera", initialCera);
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", databasePath);
+                InventoryService inventory;
+                using (var connection = new SqliteConnection(connectionString))
+                {
+                    connection.Open();
+                    inventory = InventoryService.LoadFromDb(connection, characterId, accountId);
+                }
+
+                if (!TryBuyAvatarExpansion(inventory, accountId, stage1ProductId, out var stage1Result)
+                    || stage1Result.ListType != InventoryListType.Avatar
+                    || stage1Result.SlotIndex != -1
+                    || !stage1Result.ConsumedOnPurchase
+                    || stage1Result.RemainingStackCount != 7
+                    || stage1Result.InstanceValue != 112
+                    || inventory.GetListParam16(InventoryListType.Avatar) != 7
+                    || inventory.CountMainItem(stage1Product.ItemTemplateId) != 0
+                    || LoadAvatarExpansion(connectionString, characterId) != 7)
+                    return false;
+
+                var ceraAfterStage1 = LoadCera(connectionString, characterId);
+                if (ceraAfterStage1 != initialCera - stage1Product.CoinPrice)
+                    return false;
+
+                if (TryBuyAvatarExpansion(inventory, accountId, stage1ProductId, out _)
+                    || TryBuyAvatarExpansion(inventory, accountId, stage3ProductId, out _)
+                    || LoadCera(connectionString, characterId) != ceraAfterStage1)
+                    return false;
+
+                if (!TryBuyAvatarExpansion(inventory, accountId, stage2ProductId, out var stage2Result)
+                    || stage2Result.RemainingStackCount != 14
+                    || stage2Result.InstanceValue != 119
+                    || inventory.GetListParam16(InventoryListType.Avatar) != 14
+                    || inventory.CountMainItem(stage2Product.ItemTemplateId) != 0
+                    || LoadAvatarExpansion(connectionString, characterId) != 14
+                    || LoadCera(connectionString, characterId) != ceraAfterStage1 - stage2Product.CoinPrice)
+                    return false;
+
+                var avatarBody = DfoServer.Network.Builders.ItemListPacketBuilder.BuildAvatarItemListBody(inventory);
+                return avatarBody.Length >= 3 && BitConverter.ToUInt16(avatarBody, 1) == 14;
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", previousDatabasePath);
+                SqliteConnection.ClearAllPools();
+                foreach (var path in new[] { databasePath, databasePath + "-wal", databasePath + "-shm" })
+                {
+                    try
+                    {
+                        if (File.Exists(path))
+                            File.Delete(path);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private static bool TryBuyAvatarExpansion(
+            InventoryService inventory,
+            int accountId,
+            int productId,
+            out InventoryMutationResult result)
+        {
+            return InventoryCeraShopRuntimeService.TryBuyCeraShopItem(
+                inventory,
+                accountId,
+                productId,
+                1,
+                0,
+                0,
+                0,
+                -1,
+                new CeraShopPurchaseOptions(),
+                out result,
+                out _,
+                out var handled)
+                && handled;
+        }
+
+        private static ushort LoadAvatarExpansion(string connectionString, int characterId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT list_param16
+FROM character_container_state
+WHERE character_id = @characterId AND list_type = @listType;";
+                    command.Parameters.AddWithValue("@characterId", characterId);
+                    command.Parameters.AddWithValue("@listType", (int)InventoryListType.Avatar);
+                    return Convert.ToUInt16(command.ExecuteScalar());
+                }
+            }
+        }
+
+        private static int LoadCera(string connectionString, int characterId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                return CurrencyService.LoadWallet(connection, null, characterId).Cera;
+            }
         }
 
         private static bool TryFindFiniteStackableItem(

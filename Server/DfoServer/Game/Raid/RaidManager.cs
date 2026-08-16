@@ -632,6 +632,35 @@ namespace DfoServer.Game.Raid
             }
         }
 
+        public bool TryEnterPhaseOneBreak(uint raidId, uint firstLegDungeonId, uint firstLegRequiredClears, uint secondLegDungeonId, uint secondLegRequiredClears, out RaidSnapshot raid)
+        {
+            lock (_lock)
+            {
+                raid = null;
+                if (!_raids.TryGetValue(raidId, out var aggregate)
+                    || aggregate.State != 2
+                    || aggregate.PhaseIndex != 0
+                    || firstLegRequiredClears == 0
+                    || secondLegRequiredClears == 0
+                    || !_dungeonClearCounts.TryGetValue(raidId, out var counts)
+                    || !counts.TryGetValue(firstLegDungeonId, out var firstCount)
+                    || firstCount < firstLegRequiredClears
+                    || !counts.TryGetValue(secondLegDungeonId, out var secondCount)
+                    || secondCount < secondLegRequiredClears)
+                {
+                    return false;
+                }
+
+                var elapsedMilliseconds = aggregate.PhaseStartedAtMilliseconds >= 0
+                    ? Math.Max(0, _clockMilliseconds() - aggregate.PhaseStartedAtMilliseconds)
+                    : 0;
+                aggregate.PhaseClearTimeSeconds = checked((uint)Math.Min((long)uint.MaxValue, elapsedMilliseconds / 1000));
+                aggregate.State = 3;
+                aggregate.StateArgument = 0;
+                raid = aggregate.Snapshot();
+                return true;
+            }
+        }
         public bool TryFailPhase(uint raidId, uint phaseIndex, out RaidSnapshot raid)
         {
             lock (_lock)
@@ -651,9 +680,10 @@ namespace DfoServer.Game.Raid
                     (long)uint.MaxValue,
                     elapsedMilliseconds / 1000));
                 aggregate.StartPending = false;
-                aggregate.State = 4;
-                // Distinguish timeout failure from the successful final reward state.
-                aggregate.StateArgument = 1;
+                // Client raid-state enum: 1=terminated/failed, 2=attacking,
+                // 3=result flow, 4=successful completion, 5=phase standby.
+                aggregate.State = 1;
+                aggregate.StateArgument = 0;
                 raid = aggregate.Snapshot();
                 return true;
             }

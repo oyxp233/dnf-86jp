@@ -658,7 +658,10 @@ public sealed partial class RaidHandler
 		BoosterRewardEntry[] rewards = ((obj == null) ? null : obj.UpgradableLegacyRewards?.Where((BoosterRewardEntry val) => val.ItemId >= 0 && val.Weight > 0).ToArray());
 		if (rewards == null || rewards.Length == 0)
 		{
-			return false;
+			// Anton gold containers encode gold as itemId=0, weight, count.
+			// The generic PVF parser intentionally drops zero item IDs, so
+			// resolve this legacy form locally instead of changing all items.
+			return TryRollZeroItemLegacyReward(obj?.IntData, out itemId, out count);
 		}
 		int totalWeight = rewards.Sum((BoosterRewardEntry val) => val.Weight);
 		if (totalWeight <= 0)
@@ -674,6 +677,43 @@ public sealed partial class RaidHandler
 			{
 				itemId = checked((uint)reward.ItemId);
 				count = Math.Max(1, reward.Count);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static bool TryRollZeroItemLegacyReward(string intData, out uint itemId, out int count)
+	{
+		itemId = 0u;
+		count = 0;
+		string[] tokens = (intData ?? string.Empty).Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+		List<(int Weight, int Count)> candidates = new List<(int Weight, int Count)>();
+		for (int i = 0; i + 2 < tokens.Length; i += 3)
+		{
+			if (!int.TryParse(tokens[i], out var encodedItemId)
+				|| !int.TryParse(tokens[i + 1], out var weight)
+				|| !int.TryParse(tokens[i + 2], out var rewardCount)
+				|| encodedItemId != 0
+				|| weight <= 0
+				|| rewardCount <= 0)
+			{
+				continue;
+			}
+			candidates.Add((weight, rewardCount));
+		}
+		int totalWeight = candidates.Sum((ValueTuple<int, int> candidate) => candidate.Item1);
+		if (totalWeight <= 0)
+		{
+			return false;
+		}
+		int roll = Random.Shared.Next(totalWeight);
+		foreach (var candidate in candidates)
+		{
+			roll -= candidate.Weight;
+			if (roll < 0)
+			{
+				count = candidate.Count;
 				return true;
 			}
 		}

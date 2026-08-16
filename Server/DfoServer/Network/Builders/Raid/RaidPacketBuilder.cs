@@ -253,6 +253,18 @@ namespace DfoServer.Network.Builders.Raid
             return writer.ToArray();
         }
 
+        public static byte[] BuildRaidResultState(bool failed, byte stage)
+        {
+            var writer = new GamePacketWriter();
+            // IDA sub_D85950 stores (wire byte == 0), and sub_55B340 forwards
+            // that value to the stage-7 result observer. The observer failure branch
+            // is selected when this internal flag is true, so a failed raid
+            // uses wire value zero.
+            writer.WriteByte(failed ? (byte)0 : (byte)1);
+            writer.WriteByte(stage);
+            return writer.ToArray();
+        }
+
         public static byte[] BuildRaidMovieSkip(uint movieId, uint option)
         {
             var writer = new GamePacketWriter();

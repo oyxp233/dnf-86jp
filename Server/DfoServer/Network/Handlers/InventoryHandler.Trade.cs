@@ -42,11 +42,12 @@ namespace DfoServer.Network.Handlers
                 var arrayCount = body[1];
                 var offset = 2;
                 var mutations = new List<InventoryMutationResult>();
+                var skillMaterialConsumption = new List<KeyValuePair<int, int>>();
 
                 // Entry (12B): opType(u16) + slotIndex(u16) + itemId(i32) + deleteCount(i32)
                 for (int i = 0; i < arrayCount && offset + 12 <= body.Length; i++)
                 {
-                    var opType = BitConverter.ToInt16(body, offset);
+                    var opType = BitConverter.ToUInt16(body, offset);
                     var slotIndex = BitConverter.ToInt16(body, offset + 2);
                     var itemId = BitConverter.ToInt32(body, offset + 4);
                     var deleteCount = (short)BitConverter.ToInt32(body, offset + 8);
@@ -73,10 +74,23 @@ namespace DfoServer.Network.Handlers
                         continue;
                     }
 
+                    var actualDeletedCount = Math.Max(0, (int)result.AppliedCount);
                     result.AppliedCount = deleteCount;
                     await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x0012, DeleteItemAckBuilder.Build(result)));
                     mutations.Add(result);
-                    FileLogger.Log($"[{ProtocolName}] DELETE_ITEM(ext): slot={slotIndex} item=0x{itemId:X8} applied={deleteCount} remaining={result.RemainingStackCount}");
+                    // operationType > 1 is the client wire marker for skill-material
+                    // consumption (the same rule is used by Death Tower inventory).
+                    // Manual discard and other DELETE_ITEM traffic must not advance
+                    // title-book [use item] achievements.
+                    if (IsSkillMaterialDeleteOperation(opType)
+                        && actualDeletedCount > 0)
+                    {
+                        skillMaterialConsumption.Add(
+                            new KeyValuePair<int, int>(
+                                result.ItemTemplateId,
+                                actualDeletedCount));
+                    }
+                    FileLogger.Log($"[{ProtocolName}] DELETE_ITEM(ext): op={opType} slot={slotIndex} item=0x{itemId:X8} applied={deleteCount} remaining={result.RemainingStackCount}");
                 }
 
                 if (hasInventoryLease
@@ -87,6 +101,17 @@ namespace DfoServer.Network.Handlers
                         .RecalibrateItemSeekingQuestProgressAfterInventoryMutationsWithoutNotification(
                             lease,
                             mutations);
+                }
+
+                if (skillMaterialConsumption.Count > 0)
+                {
+                    var achievementResults =
+                        _sqliteSelectCharacterDataSource.TriggerUseItemAchievements(
+                            cid,
+                            skillMaterialConsumption);
+                    _titleBookAchievementProgressBatcher.Queue(
+                        session,
+                        achievementResults);
                 }
                 return;
             }
@@ -398,13 +423,27 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            var w = new GamePacketWriter();
-            w.WriteByte(1);
-            w.WriteInt32(result.QuestId);
-            w.WriteUInt16(result.Remain1);
-            w.WriteUInt16(result.Remain2);
-            w.WriteUInt16(result.Remain3);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, header.type, w.ToArray()));
+            if (!SaveTitleBookMutation(session, cid))
+                FileLogger.Log($"[{ProtocolName}] ACHIEVEMENT_TRIGGER: SaveDirty failed cid={cid} quest={questId}");
+
+            await SendAchievementTriggerResult(session, cid, result);
+        }
+
+        private async Task SendAchievementTriggerResult(
+            EnhancedClientSession session,
+            int characterId,
+            Game.TitleBook.AchievementTriggerResult result)
+        {
+            var progress = new GamePacketWriter();
+            progress.WriteByte(1);
+            progress.WriteInt32(result.QuestId);
+            progress.WriteUInt16(result.Remain1);
+            progress.WriteUInt16(result.Remain2);
+            progress.WriteUInt16(result.Remain3);
+            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                0x01,
+                0x01A1,
+                progress.ToArray()));
 
             if (result.Completed && result.TitleItemId > 0)
             {
@@ -415,9 +454,50 @@ namespace DfoServer.Network.Handlers
                 complete.WriteInt32(result.TitleItemId);
                 complete.WriteUInt16((ushort)Math.Max(0, result.BookIndex));
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0168, complete.ToArray()));
-                await SendTitleBookCategoryRefresh(session, cid, result.Category);
+                await SendTitleBookCategoryRefresh(session, characterId, result.Category);
             }
         }
+
+        private async Task FlushUseItemAchievementProgressAsync(
+            EnhancedClientSession session,
+            int characterId,
+            IReadOnlyList<Game.TitleBook.AchievementTriggerResult> results)
+        {
+            if (session?.Player == null
+                || session.Player.CharacterId != characterId
+                || results == null
+                || results.Count == 0)
+            {
+                return;
+            }
+
+            var completed = false;
+            foreach (var result in results)
+                completed |= result.Completed;
+
+            // Ordinary progress remains dirty in the shared online inventory and is
+            // persisted together with the item deduction by the existing periodic /
+            // disconnect save. Only completion is forced immediately so the awarded
+            // title and the zero remainder commit atomically before notification.
+            if (completed && !SaveTitleBookMutation(session, characterId))
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] ACHIEVEMENT_USE_ITEM: " +
+                    $"completion SaveDirty failed cid={characterId}");
+            }
+
+            foreach (var result in results)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] ACHIEVEMENT_USE_ITEM: cid={characterId} " +
+                    $"quest={result.QuestId} remain={result.Remain1} " +
+                    $"completed={result.Completed}");
+                await SendAchievementTriggerResult(session, characterId, result);
+            }
+        }
+
+        internal static bool IsSkillMaterialDeleteOperation(ushort operationType)
+            => operationType > 1;
 
         private static byte[] BuildTitleBookSuccess(int itemSpace, short slot, int category, int index)
         {

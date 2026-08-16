@@ -12,16 +12,12 @@ namespace DfoServer.Game.Dungeon.Tournament
     internal sealed class TournamentDungeonApplicationService
     {
         private readonly Func<InventoryLease, bool> _persistInventory;
-        private readonly DungeonEntryCostService _entryCosts;
 
         internal TournamentDungeonApplicationService(
-            Func<InventoryLease, bool> persistInventory = null,
-            DungeonEntryCostService entryCosts = null)
+            Func<InventoryLease, bool> persistInventory = null)
         {
             _persistInventory = persistInventory
                 ?? InventoryPersistenceService.SaveDirty;
-            _entryCosts = entryCosts
-                ?? new DungeonEntryCostService(_persistInventory);
         }
 
         internal bool TryPrepareRun(
@@ -335,78 +331,6 @@ namespace DfoServer.Game.Dungeon.Tournament
                 "tournament-card-" + cardType,
                 DungeonEffectScope.Player,
                 run.RunId);
-
-        internal bool TryConsumeEntryItems(
-            InventoryLease lease,
-            TournamentDungeonDefinition definition,
-            byte missingMemberSlot,
-            out InventoryMutationSet changes,
-            out DungeonAdmissionReject rejection,
-            out string failureReason)
-        {
-            changes = new InventoryMutationSet();
-            rejection = DungeonAdmissionReject.Unknown;
-            failureReason = string.Empty;
-            if (lease == null)
-            {
-                rejection = DungeonAdmissionReject.InvalidSelectionState;
-                failureReason = "inventory lease is missing";
-                return false;
-            }
-            if (definition == null)
-            {
-                rejection = DungeonAdmissionReject.DungeonUnavailable;
-                failureReason = "tournament definition is missing";
-                return false;
-            }
-
-            var requirements = new List<DungeonEntryItemRequirement>(
-                definition.EntryItems.Count);
-            foreach (var entry in definition.EntryItems)
-            {
-                requirements.Add(new DungeonEntryItemRequirement(
-                    entry.ItemId,
-                    entry.Count,
-                    entry.ConsumeOnEntry));
-            }
-
-            var result = _entryCosts.TryConsumeRequiredItems(
-                lease,
-                requirements);
-            if (!result.Success)
-            {
-                rejection = ResolveEntryCostReject(
-                    result.FailureKind,
-                    missingMemberSlot);
-                failureReason = result.FailReason;
-                return false;
-            }
-
-            foreach (var update in result.ConsumedItems)
-                changes.AddSlot(InventoryListType.Main, update.SlotIndex);
-            return true;
-        }
-
-        private static DungeonAdmissionReject ResolveEntryCostReject(
-            EntryCostFailureKind failureKind,
-            byte missingMemberSlot)
-        {
-            switch (failureKind)
-            {
-                case EntryCostFailureKind.MissingRequiredItem:
-                    return DungeonAdmissionReject.MissingRequiredItem(
-                        missingMemberSlot);
-                case EntryCostFailureKind.Unavailable:
-                    return DungeonAdmissionReject.DungeonUnavailable;
-                case EntryCostFailureKind.MissingPermission:
-                    return DungeonAdmissionReject.MissingPermission(
-                        missingMemberSlot);
-                case EntryCostFailureKind.InvalidState:
-                case EntryCostFailureKind.None:
-                default:
-                    return DungeonAdmissionReject.Unknown;
-            }
-        }
 
         internal bool TryDeliverReward(
             InventoryLease lease,

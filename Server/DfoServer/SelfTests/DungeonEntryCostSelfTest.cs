@@ -88,6 +88,8 @@ namespace DfoServer.SelfTests
                 consumed.Success
                 && consumed.ConsumedItems.Sum(item => item.Count) == 3
                 && consumed.ConsumedItems.Count == 2
+                && consumed.ConsumedItems.All(
+                    item => item.ItemId == LoveMagathaInvitationId)
                 && splitLease.Inventory.CountMainItem(
                     LoveMagathaInvitationId) == 1
                 && splitLease.Inventory.GetItem(
@@ -204,6 +206,181 @@ namespace DfoServer.SelfTests
                 && noTowerTicket.AlternativeIndex == -1,
                 ref failures);
 
+            var combinedPersistCalls = 0;
+            var combinedService = new DungeonEntryCostService(_ =>
+            {
+                combinedPersistCalls++;
+                return true;
+            });
+            var combinedPlan = CreateCombinedEntryPlan();
+            var combinedLease = CreateLease(characterId: 991408);
+            AddStack(
+                combinedLease.Inventory,
+                slotIndex: 17,
+                LoveMagathaInvitationId,
+                count: 3);
+            AddStack(
+                combinedLease.Inventory,
+                slotIndex: 18,
+                TauKingdomPassId,
+                count: 1);
+            AddStack(
+                combinedLease.Inventory,
+                slotIndex: 19,
+                DeathInvitationId,
+                count: 24);
+            combinedLease.Inventory.SetMainVirtualCount(
+                InventoryService.MainVirtualCurrencySlotStart,
+                count: 200000);
+            var combinedValidation = combinedService.TryValidatePlan(
+                combinedLease,
+                combinedPlan);
+            Check("combined admission validates without side effects",
+                combinedValidation.Success
+                && combinedValidation.IsFreePass
+                && combinedPersistCalls == 0
+                && combinedLease.Inventory.CountMainItem(
+                    LoveMagathaInvitationId) == 3
+                && combinedLease.Inventory.CountMainItem(
+                    TauKingdomPassId) == 1
+                && combinedLease.Inventory.CountMainItem(0) == 200000,
+                ref failures);
+
+            var combinedCommit = combinedService.TryCommitPlan(
+                combinedLease,
+                combinedPlan);
+            Check("combined admission persists items and gold once",
+                combinedCommit.Success
+                && combinedCommit.IsFreePass
+                && combinedCommit.GoldCost == 190000
+                && combinedCommit.GoldBefore == 200000
+                && combinedCommit.GoldAfter == 10000
+                && combinedCommit.ConsumedItems.Sum(item => item.Count) == 4
+                && combinedPersistCalls == 1
+                && combinedLease.Inventory.CountMainItem(
+                    LoveMagathaInvitationId) == 0
+                && combinedLease.Inventory.CountMainItem(
+                    TauKingdomPassId) == 0
+                && combinedLease.Inventory.CountMainItem(
+                    DeathInvitationId) == 24,
+                ref failures);
+
+            var combinedMissingLease = CreateLease(characterId: 991409);
+            AddStack(
+                combinedMissingLease.Inventory,
+                slotIndex: 20,
+                LoveMagathaInvitationId,
+                count: 3);
+            combinedMissingLease.Inventory.SetMainVirtualCount(
+                InventoryService.MainVirtualCurrencySlotStart,
+                count: 200000);
+            var combinedMissing = combinedService.TryValidatePlan(
+                combinedMissingLease,
+                combinedPlan);
+            Check("combined admission reports canonical normal ticket and consumes nothing",
+                !combinedMissing.Success
+                && combinedMissing.FailureKind
+                    == EntryCostFailureKind.MissingRequiredItem
+                && combinedMissing.MissingItemId == DeathInvitationId
+                && combinedMissing.RequiredCount == 24
+                && combinedMissingLease.Inventory.CountMainItem(
+                    LoveMagathaInvitationId) == 3
+                && combinedMissingLease.Inventory.CountMainItem(0) == 200000
+                && combinedPersistCalls == 1,
+                ref failures);
+
+            var combinedRollbackLease = CreateLease(characterId: 991410);
+            AddStack(
+                combinedRollbackLease.Inventory,
+                slotIndex: 21,
+                LoveMagathaInvitationId,
+                count: 3);
+            AddStack(
+                combinedRollbackLease.Inventory,
+                slotIndex: 22,
+                TauKingdomPassId,
+                count: 1);
+            combinedRollbackLease.Inventory.SetMainVirtualCount(
+                InventoryService.MainVirtualCurrencySlotStart,
+                count: 200000);
+            var combinedRollbackService =
+                new DungeonEntryCostService(_ => false);
+            var combinedRollback = combinedRollbackService.TryCommitPlan(
+                combinedRollbackLease,
+                combinedPlan);
+            Check("combined admission rolls back every cost when persistence fails",
+                !combinedRollback.Success
+                && combinedRollback.FailureKind
+                    == EntryCostFailureKind.InvalidState
+                && combinedRollbackLease.Inventory.CountMainItem(
+                    LoveMagathaInvitationId) == 3
+                && combinedRollbackLease.Inventory.CountMainItem(
+                    TauKingdomPassId) == 1
+                && combinedRollbackLease.Inventory.CountMainItem(0) == 200000,
+                ref failures);
+
+            var applicationPersistCalls = 0;
+            var application =
+                new DungeonEntryAdmissionApplicationService(
+                    new DungeonEntryCostService(_ =>
+                    {
+                        applicationPersistCalls++;
+                        return true;
+                    }));
+            var applicationMissingLease = CreateLease(
+                characterId: 991411);
+            var applicationRun = new DungeonRun(
+                LoveMagathaDungeonId,
+                difficulty: 0);
+            var applicationMissing = application.TryPrepareRun(
+                applicationMissingLease,
+                applicationRun,
+                tournamentDefinition: null,
+                manualHellParty: false,
+                requestedHellDifficulty: 0,
+                maze: null,
+                mazeIndex: 0,
+                gorgeousChallengeEnabled: false,
+                out _,
+                out var applicationMissingValidation);
+            Check("application boundary resolves PVF entry requirements without mutation",
+                !applicationMissing
+                && applicationMissingValidation.FailureKind
+                    == EntryCostFailureKind.MissingRequiredItem
+                && applicationMissingValidation.MissingItemId
+                    == LoveMagathaInvitationId
+                && applicationPersistCalls == 0,
+                ref failures);
+
+            var applicationLease = CreateLease(characterId: 991412);
+            AddStack(
+                applicationLease.Inventory,
+                slotIndex: 23,
+                LoveMagathaInvitationId,
+                count: 3);
+            var applicationPrepared = application.TryPrepareRun(
+                applicationLease,
+                applicationRun,
+                tournamentDefinition: null,
+                manualHellParty: false,
+                requestedHellDifficulty: 0,
+                maze: null,
+                mazeIndex: 0,
+                gorgeousChallengeEnabled: false,
+                out var applicationPreparation,
+                out var applicationValidation);
+            var applicationCommit = application.TryCommit(
+                applicationLease,
+                applicationPreparation);
+            Check("application boundary commits PVF entry requirement once",
+                applicationPrepared
+                && applicationValidation.Success
+                && applicationCommit.Success
+                && applicationPersistCalls == 1
+                && applicationLease.Inventory.CountMainItem(
+                    LoveMagathaInvitationId) == 0,
+                ref failures);
+
             Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures}");
             return failures == 0 ? 0 : 1;
         }
@@ -270,6 +447,43 @@ namespace DfoServer.SelfTests
                         consumeOnEntry: true),
                 },
             };
+        }
+
+        private static DungeonEntryCostPlan CreateCombinedEntryPlan()
+        {
+            var plan = new DungeonEntryCostPlan("selftest-combined");
+            plan.AddRequiredItems(new[]
+            {
+                new DungeonEntryItemRequirement(
+                    LoveMagathaInvitationId,
+                    3,
+                    consumeOnEntry: true),
+            });
+            plan.AddAlternativeGroup(
+                new[]
+                {
+                    new DungeonEntryCostAlternative(
+                        new[]
+                        {
+                            new DungeonEntryItemRequirement(
+                                TauKingdomPassId,
+                                1,
+                                consumeOnEntry: true),
+                        },
+                        isFreePass: true),
+                    new DungeonEntryCostAlternative(
+                        new[]
+                        {
+                            new DungeonEntryItemRequirement(
+                                DeathInvitationId,
+                                24,
+                                consumeOnEntry: true),
+                        }),
+                },
+                missingAlternativeIndex: 1);
+            if (!plan.TryAddGoldCost(190000))
+                throw new InvalidOperationException("failed to add gold cost");
+            return plan;
         }
 
         private static InventoryLease CreateLease(int characterId)

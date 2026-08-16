@@ -98,7 +98,9 @@ namespace DfoServer.SelfTests
                 "ticket missing normalNeed=24",
                 EntryCostFailureKind.MissingRequiredItem);
             var missingHellTicketReject = DungeonEntryHandler
-                .ResolveHellEntryReject(missingHellTicket, memberSlot: 2);
+                .ResolveEntryAdmissionReject(
+                    missingHellTicket,
+                    memberSlot: 2);
             var missingHellTicketAck = Network.Builders
                 .DungeonAdmissionRejectBuilder.Build(missingHellTicketReject);
             Check("missing hell ticket rejects SELECT_DUNGEON for the affected party slot",

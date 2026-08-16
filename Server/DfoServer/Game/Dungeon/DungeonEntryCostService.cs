@@ -25,6 +25,85 @@ namespace DfoServer.Game.Dungeon
         internal bool ConsumeOnEntry { get; }
     }
 
+    internal sealed class DungeonEntryCostAlternative
+    {
+        internal DungeonEntryCostAlternative(
+            IReadOnlyList<DungeonEntryItemRequirement> requirements,
+            bool isFreePass = false)
+        {
+            Requirements = requirements;
+            IsFreePass = isFreePass;
+        }
+
+        internal IReadOnlyList<DungeonEntryItemRequirement> Requirements { get; }
+        internal bool IsFreePass { get; }
+    }
+
+    internal sealed class DungeonEntryCostAlternativeGroup
+    {
+        internal DungeonEntryCostAlternativeGroup(
+            IReadOnlyList<DungeonEntryCostAlternative> alternatives,
+            int missingAlternativeIndex)
+        {
+            Alternatives = alternatives;
+            MissingAlternativeIndex = missingAlternativeIndex;
+        }
+
+        internal IReadOnlyList<DungeonEntryCostAlternative> Alternatives { get; }
+        internal int MissingAlternativeIndex { get; }
+    }
+
+    internal sealed class DungeonEntryCostPlan
+    {
+        private readonly List<DungeonEntryItemRequirement> _requiredItems =
+            new List<DungeonEntryItemRequirement>();
+        private readonly List<DungeonEntryCostAlternativeGroup>
+            _alternativeGroups =
+                new List<DungeonEntryCostAlternativeGroup>();
+
+        internal DungeonEntryCostPlan(string source)
+        {
+            Source = string.IsNullOrWhiteSpace(source)
+                ? "dungeon-entry"
+                : source;
+        }
+
+        internal string Source { get; }
+        internal IReadOnlyList<DungeonEntryItemRequirement> RequiredItems =>
+            _requiredItems;
+        internal IReadOnlyList<DungeonEntryCostAlternativeGroup>
+            AlternativeGroups => _alternativeGroups;
+        internal int GoldCost { get; private set; }
+
+        internal void AddRequiredItems(
+            IEnumerable<DungeonEntryItemRequirement> requirements)
+        {
+            if (requirements == null)
+                return;
+            _requiredItems.AddRange(requirements);
+        }
+
+        internal void AddAlternativeGroup(
+            IReadOnlyList<DungeonEntryCostAlternative> alternatives,
+            int missingAlternativeIndex = 0)
+        {
+            _alternativeGroups.Add(new DungeonEntryCostAlternativeGroup(
+                alternatives,
+                missingAlternativeIndex));
+        }
+
+        internal bool TryAddGoldCost(int amount)
+        {
+            if (amount < 0)
+                return false;
+            var total = (long)GoldCost + amount;
+            if (total > int.MaxValue)
+                return false;
+            GoldCost = (int)total;
+            return true;
+        }
+    }
+
     internal sealed class DungeonEntryCostService
     {
         private readonly Func<InventoryLease, bool> _persistInventory;
@@ -62,117 +141,16 @@ namespace DfoServer.Game.Dungeon
             InventoryLease lease,
             IReadOnlyList<DungeonEntryItemRequirement> requiredItems)
         {
-            var result = new EntryCostResult();
-            if (lease?.Inventory == null)
-                return result.Fail(
-                    "inventory lease is missing",
-                    EntryCostFailureKind.InvalidState);
-
             if (requiredItems == null)
-                return result.Fail(
+            {
+                return new EntryCostResult().Fail(
                     "required item definition is missing",
                     EntryCostFailureKind.Unavailable);
-
-            if (requiredItems.Count == 0)
-            {
-                result.Success = true;
-                return result;
             }
 
-            if (!TryNormalizeRequiredItems(
-                    requiredItems,
-                    out var requiredCounts,
-                    out var consumedCounts,
-                    out var failureReason))
-            {
-                return result.Fail(
-                    failureReason,
-                    EntryCostFailureKind.Unavailable);
-            }
-
-            EntryItemSnapshot snapshot = null;
-            lock (lease.SyncRoot)
-            {
-                try
-                {
-                    foreach (var requirement in requiredCounts)
-                    {
-                        var current = lease.Inventory.CountMainItem(
-                            requirement.Key);
-                        if (current < requirement.Value)
-                        {
-                            result.MissingItemId = requirement.Key;
-                            result.RequiredCount = requirement.Value;
-                            result.AvailableCount = current;
-                            return result.Fail(
-                                $"entry item missing item={requirement.Key} " +
-                                $"need={requirement.Value} have={current}",
-                                EntryCostFailureKind.MissingRequiredItem);
-                        }
-                    }
-
-                    if (consumedCounts.Count == 0)
-                    {
-                        result.Success = true;
-                        return result;
-                    }
-
-                    snapshot = EntryItemSnapshot.Capture(
-                        lease.Inventory,
-                        consumedCounts.Keys);
-                    var requirements = consumedCounts
-                        .OrderBy(pair => pair.Key)
-                        .Select(pair => new InventoryMaterialRequirement(
-                            pair.Key,
-                            pair.Value))
-                        .ToList();
-                    var consumed = new List<InventoryMaterialConsumptionEntry>();
-                    if (!InventoryMaterialConsumptionService.TryConsume(
-                            lease.Inventory,
-                            requirements,
-                            consumed))
-                    {
-                        snapshot.Restore(lease.Inventory);
-                        return result.Fail(
-                            "entry item consumption failed",
-                            EntryCostFailureKind.InvalidState);
-                    }
-
-                    if (!_persistInventory(lease))
-                    {
-                        snapshot.Restore(lease.Inventory);
-                        return result.Fail(
-                            "entry item persistence failed",
-                            EntryCostFailureKind.InvalidState);
-                    }
-
-                    foreach (var entry in consumed)
-                    {
-                        result.ConsumedItems.Add(new ItemConsumeUpdate
-                        {
-                            ItemId = entry.ItemTemplateId,
-                            Count = entry.Count,
-                            SlotIndex = entry.SlotIndex,
-                            RemainingCount = ResolveRemainingCount(
-                                lease.Inventory,
-                                entry.SlotIndex),
-                        });
-                    }
-
-                    result.Success = true;
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    snapshot?.Restore(lease.Inventory);
-                    FileLogger.Log(
-                        $"[DungeonEntryCost] TryConsumeRequiredItems ERROR: " +
-                        ex.Message);
-                    return result.Fail(
-                        ex.Message,
-                        EntryCostFailureKind.InvalidState);
-                }
-            }
+            var plan = new DungeonEntryCostPlan("required-item");
+            plan.AddRequiredItems(requiredItems);
+            return TryCommitPlan(lease, plan);
         }
 
         internal EntryCostResult TryConsumePreferredAlternative(
@@ -180,166 +158,32 @@ namespace DfoServer.Game.Dungeon
             IReadOnlyList<IReadOnlyList<DungeonEntryItemRequirement>>
                 alternatives)
         {
-            var result = new EntryCostResult();
-            if (lease?.Inventory == null)
-                return result.Fail(
-                    "inventory lease is missing",
-                    EntryCostFailureKind.InvalidState);
             if (alternatives == null || alternatives.Count == 0)
-                return result.Fail(
+                return new EntryCostResult().Fail(
                     "entry item alternatives are missing",
                     EntryCostFailureKind.Unavailable);
 
-            lock (lease.SyncRoot)
+            var projected = new List<DungeonEntryCostAlternative>(
+                alternatives.Count);
+            foreach (var alternative in alternatives)
             {
-                for (var index = 0; index < alternatives.Count; index++)
-                {
-                    if (!TryNormalizeRequiredItems(
-                            alternatives[index],
-                            out _,
-                            out _,
-                            out var failureReason))
-                    {
-                        return result.Fail(
-                            $"entry item alternative {index} is invalid: " +
-                            failureReason,
-                            EntryCostFailureKind.Unavailable);
-                    }
-                }
-
-                for (var index = 0; index < alternatives.Count; index++)
-                {
-                    if (!HasRequiredItems(
-                            lease.Inventory,
-                            alternatives[index]))
-                    {
-                        continue;
-                    }
-
-                    result = TryConsumeRequiredItems(
-                        lease,
-                        alternatives[index]);
-                    result.AlternativeIndex = index;
-                    return result;
-                }
-
-                // Use the primary alternative to retain the canonical missing
-                // item and quantity in the protocol rejection context.
-                result = TryConsumeRequiredItems(lease, alternatives[0]);
-                result.AlternativeIndex = -1;
-                return result;
+                projected.Add(new DungeonEntryCostAlternative(alternative));
             }
+
+            var plan = new DungeonEntryCostPlan("preferred-alternative");
+            plan.AddAlternativeGroup(projected);
+            return TryCommitPlan(lease, plan);
         }
 
-        internal EntryCostResult TryConsumeAbyssPartyTicket(
+        internal EntryCostResult TryValidatePlan(
             InventoryLease lease,
-            WorldMapArea area, int dungeonMinLevel)
-        {
-            var result = new EntryCostResult();
-            if (lease?.Inventory == null || lease.CharacterId <= 0)
-                return result.Fail(
-                    "invalid character",
-                    EntryCostFailureKind.InvalidState);
+            DungeonEntryCostPlan plan)
+            => EvaluatePlan(lease, plan, commit: false);
 
-            if (area == null)
-                return result.Fail(
-                    "worldmap area missing",
-                    EntryCostFailureKind.Unavailable);
-
-            if (!area.HellDungeon)
-                return result.Fail(
-                    "area is not hell dungeon",
-                    EntryCostFailureKind.Unavailable);
-
-            if (!CheckHellQuestRequirement(lease.CharacterId, area, out var missingQuestId))
-                return result.Fail(
-                    $"hell quest not cleared quest={missingQuestId}",
-                    EntryCostFailureKind.MissingPermission);
-
-            try
-            {
-                foreach (var ticket in area.HellFreePassItems)
-                {
-                    if (ticket.ItemId <= 0 || ticket.Count <= 0)
-                        continue;
-
-                    if (lease.Inventory.CountMainItem(ticket.ItemId)
-                        < ticket.Count)
-                        continue;
-
-                    result = TryConsumeRequiredItems(
-                        lease,
-                        new[]
-                        {
-                            new DungeonEntryItemRequirement(
-                                ticket.ItemId,
-                                ticket.Count,
-                                consumeOnEntry: true),
-                        });
-                    if (result.Success)
-                        result.IsFreePass = true;
-                    return result;
-                }
-
-                var normalNeedCount = WorldMap.GetHellNormalTicketNeedCount(dungeonMinLevel);
-                if (normalNeedCount <= 0)
-                    return result.Fail(
-                        $"dungeon min level too low minLevel={dungeonMinLevel}",
-                        EntryCostFailureKind.Unavailable);
-
-                var normalTicketItemIds = area.HellNormalTicketItemIds;
-                if (normalTicketItemIds.Count == 0)
-                    return result.Fail(
-                        "normal ticket item missing",
-                        EntryCostFailureKind.Unavailable);
-
-                var selectedNormalTicketItemId = 0;
-                foreach (var itemId in normalTicketItemIds)
-                {
-                    if (itemId > 0
-                        && lease.Inventory.CountMainItem(itemId)
-                            >= normalNeedCount)
-                    {
-                        selectedNormalTicketItemId = itemId;
-                        break;
-                    }
-                }
-
-                if (selectedNormalTicketItemId <= 0)
-                {
-                    var missingItemId = normalTicketItemIds
-                        .FirstOrDefault(itemId => itemId > 0);
-                    result.MissingItemId = missingItemId;
-                    result.RequiredCount = normalNeedCount;
-                    result.AvailableCount = missingItemId <= 0
-                        ? 0
-                        : lease.Inventory.CountMainItem(missingItemId);
-                    return result.Fail(
-                        $"ticket missing normalNeed={normalNeedCount}",
-                        EntryCostFailureKind.MissingRequiredItem);
-                }
-
-                result = TryConsumeRequiredItems(
-                    lease,
-                    new[]
-                    {
-                        new DungeonEntryItemRequirement(
-                            selectedNormalTicketItemId,
-                            normalNeedCount,
-                            consumeOnEntry: true),
-                    });
-                if (result.Success)
-                    result.IsFreePass = false;
-                return result;
-            }
-            catch (Exception ex)
-            {
-                FileLogger.Log($"[DungeonEntryCost] TryConsumeAbyssPartyTicket ERROR: {ex.Message}");
-                return result.Fail(
-                    ex.Message,
-                    EntryCostFailureKind.InvalidState);
-            }
-        }
+        internal EntryCostResult TryCommitPlan(
+            InventoryLease lease,
+            DungeonEntryCostPlan plan)
+            => EvaluatePlan(lease, plan, commit: true);
 
         internal bool CheckHellQuestRequirement(
             int characterId,
@@ -381,6 +225,335 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
+            return true;
+        }
+
+        private EntryCostResult EvaluatePlan(
+            InventoryLease lease,
+            DungeonEntryCostPlan plan,
+            bool commit)
+        {
+            var result = new EntryCostResult();
+            if (lease?.Inventory == null)
+            {
+                return result.Fail(
+                    "inventory lease is missing",
+                    EntryCostFailureKind.InvalidState);
+            }
+            if (plan == null)
+            {
+                return result.Fail(
+                    "entry cost plan is missing",
+                    EntryCostFailureKind.Unavailable);
+            }
+
+            EntryItemSnapshot snapshot = null;
+            lock (lease.SyncRoot)
+            {
+                try
+                {
+                    if (!TryResolvePlan(
+                            lease.Inventory,
+                            plan,
+                            result,
+                            out var requiredCounts,
+                            out var consumedCounts,
+                            out var failureReason))
+                    {
+                        return result.Fail(
+                            failureReason,
+                            result.FailureKind == EntryCostFailureKind.None
+                                ? EntryCostFailureKind.Unavailable
+                                : result.FailureKind);
+                    }
+
+                    if (!commit || consumedCounts.Count == 0)
+                    {
+                        result.Success = true;
+                        return result;
+                    }
+
+                    snapshot = EntryItemSnapshot.Capture(
+                        lease.Inventory,
+                        consumedCounts.Keys);
+                    var requirements = consumedCounts
+                        .Where(pair => pair.Key != 0)
+                        .OrderBy(pair => pair.Key)
+                        .Select(pair => new InventoryMaterialRequirement(
+                            pair.Key,
+                            pair.Value))
+                        .ToList();
+                    var consumed =
+                        new List<InventoryMaterialConsumptionEntry>();
+                    result.GoldBefore = lease.Inventory.CountMainItem(0);
+                    if (!InventoryMaterialConsumptionService.TryConsume(
+                            lease.Inventory,
+                            requirements,
+                            consumed))
+                    {
+                        snapshot.Restore(lease.Inventory);
+                        return result.Fail(
+                            "entry cost consumption failed",
+                            EntryCostFailureKind.InvalidState);
+                    }
+                    if (consumedCounts.TryGetValue(0, out var goldCost)
+                        && goldCost > 0)
+                    {
+                        if (!lease.Inventory.TryConsumeMainItem(
+                                0,
+                                goldCost,
+                                out var goldConsume)
+                            || !goldConsume.Success)
+                        {
+                            snapshot.Restore(lease.Inventory);
+                            return result.Fail(
+                                "entry gold consumption failed",
+                                EntryCostFailureKind.InvalidState);
+                        }
+                        consumed.Add(new InventoryMaterialConsumptionEntry
+                        {
+                            SlotIndex = goldConsume.SlotIndex,
+                            ItemTemplateId = 0,
+                            Count = goldConsume.ConsumedCount,
+                        });
+                    }
+
+                    if (!_persistInventory(lease))
+                    {
+                        snapshot.Restore(lease.Inventory);
+                        return result.Fail(
+                            "entry cost persistence failed",
+                            EntryCostFailureKind.InvalidState);
+                    }
+
+                    foreach (var entry in consumed)
+                    {
+                        if (entry.ItemTemplateId == 0)
+                        {
+                            result.GoldCost += entry.Count;
+                            continue;
+                        }
+
+                        result.ConsumedItems.Add(new ItemConsumeUpdate
+                        {
+                            ItemId = entry.ItemTemplateId,
+                            Count = entry.Count,
+                            SlotIndex = entry.SlotIndex,
+                            RemainingCount = ResolveRemainingCount(
+                                lease.Inventory,
+                                entry.SlotIndex),
+                        });
+                    }
+                    result.GoldAfter = lease.Inventory.CountMainItem(0);
+                    result.Success = true;
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    snapshot?.Restore(lease.Inventory);
+                    FileLogger.Log(
+                        $"[DungeonEntryCost] {plan.Source} ERROR: " +
+                        ex.Message);
+                    return result.Fail(
+                        ex.Message,
+                        EntryCostFailureKind.InvalidState);
+                }
+            }
+        }
+
+        private static bool TryResolvePlan(
+            InventoryService inventory,
+            DungeonEntryCostPlan plan,
+            EntryCostResult result,
+            out Dictionary<int, int> requiredCounts,
+            out Dictionary<int, int> consumedCounts,
+            out string failureReason)
+        {
+            if (!TryNormalizeRequiredItems(
+                    plan.RequiredItems,
+                    out requiredCounts,
+                    out consumedCounts,
+                    out failureReason))
+            {
+                return false;
+            }
+
+            if (plan.GoldCost < 0
+                || (plan.GoldCost > 0
+                    && (!TryAddCount(requiredCounts, 0, plan.GoldCost)
+                        || !TryAddCount(consumedCounts, 0, plan.GoldCost))))
+            {
+                failureReason = "entry gold cost is invalid";
+                return false;
+            }
+
+            if (!TryFindFirstMissing(
+                    inventory,
+                    requiredCounts,
+                    result))
+            {
+                failureReason = result.FailReason;
+                return false;
+            }
+
+            for (var groupIndex = 0;
+                 groupIndex < plan.AlternativeGroups.Count;
+                 groupIndex++)
+            {
+                var group = plan.AlternativeGroups[groupIndex];
+                var alternatives = group?.Alternatives;
+                if (alternatives == null || alternatives.Count == 0)
+                {
+                    failureReason =
+                        $"entry item alternative group {groupIndex} is empty";
+                    return false;
+                }
+
+                Dictionary<int, int> selectedRequired = null;
+                Dictionary<int, int> selectedConsumed = null;
+                var selectedIndex = -1;
+                var selectedIsFreePass = false;
+                for (var optionIndex = 0;
+                     optionIndex < alternatives.Count;
+                     optionIndex++)
+                {
+                    var option = alternatives[optionIndex];
+                    if (option?.Requirements == null)
+                    {
+                        failureReason =
+                            $"entry item alternative {groupIndex}:" +
+                            $"{optionIndex} is missing";
+                        return false;
+                    }
+                    if (!TryNormalizeRequiredItems(
+                            option.Requirements,
+                            out var optionRequired,
+                            out var optionConsumed,
+                            out var optionFailure))
+                    {
+                        failureReason =
+                            $"entry item alternative {groupIndex}:" +
+                            $"{optionIndex} is invalid: {optionFailure}";
+                        return false;
+                    }
+
+                    var candidateRequired =
+                        new Dictionary<int, int>(requiredCounts);
+                    var candidateConsumed =
+                        new Dictionary<int, int>(consumedCounts);
+                    if (!TryMergeCounts(
+                            candidateRequired,
+                            optionRequired)
+                        || !TryMergeCounts(
+                            candidateConsumed,
+                            optionConsumed))
+                    {
+                        failureReason =
+                            $"entry item alternative {groupIndex}:" +
+                            $"{optionIndex} count overflow";
+                        return false;
+                    }
+
+                    if (!HasRequiredCounts(inventory, candidateRequired))
+                        continue;
+
+                    selectedRequired = candidateRequired;
+                    selectedConsumed = candidateConsumed;
+                    selectedIndex = optionIndex;
+                    selectedIsFreePass = option.IsFreePass;
+                    break;
+                }
+
+                if (selectedIndex < 0)
+                {
+                    var missingIndex = group.MissingAlternativeIndex;
+                    if (missingIndex < 0 || missingIndex >= alternatives.Count)
+                    {
+                        failureReason =
+                            $"entry item alternative group {groupIndex} " +
+                            $"has invalid missing index {missingIndex}";
+                        return false;
+                    }
+                    var primary = alternatives[missingIndex];
+                    if (primary?.Requirements == null
+                        || !TryNormalizeRequiredItems(
+                            primary.Requirements,
+                            out var primaryRequired,
+                            out _,
+                            out failureReason)
+                        || !TryMergeCounts(requiredCounts, primaryRequired))
+                    {
+                        return false;
+                    }
+
+                    TryFindFirstMissing(inventory, requiredCounts, result);
+                    result.AlternativeIndex = -1;
+                    failureReason = result.FailReason;
+                    return false;
+                }
+
+                requiredCounts = selectedRequired;
+                consumedCounts = selectedConsumed;
+                result.SelectedAlternativeIndexes.Add(selectedIndex);
+                if (groupIndex == 0)
+                    result.AlternativeIndex = selectedIndex;
+                if (selectedIsFreePass)
+                    result.IsFreePass = true;
+            }
+
+            failureReason = string.Empty;
+            return true;
+        }
+
+        private static bool TryFindFirstMissing(
+            InventoryService inventory,
+            IReadOnlyDictionary<int, int> requiredCounts,
+            EntryCostResult result)
+        {
+            foreach (var requirement in requiredCounts
+                         .OrderBy(pair => pair.Key))
+            {
+                var current = inventory.CountMainItem(requirement.Key);
+                if (current >= requirement.Value)
+                    continue;
+
+                result.MissingItemId = requirement.Key;
+                result.RequiredCount = requirement.Value;
+                result.AvailableCount = current;
+                result.FailureKind = EntryCostFailureKind.MissingRequiredItem;
+                result.FailReason =
+                    $"entry item missing item={requirement.Key} " +
+                    $"need={requirement.Value} have={current}";
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool HasRequiredCounts(
+            InventoryService inventory,
+            IReadOnlyDictionary<int, int> requiredCounts)
+        {
+            foreach (var requirement in requiredCounts)
+            {
+                if (inventory.CountMainItem(requirement.Key)
+                    < requirement.Value)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool TryMergeCounts(
+            IDictionary<int, int> target,
+            IReadOnlyDictionary<int, int> source)
+        {
+            foreach (var pair in source)
+            {
+                if (!TryAddCount(target, pair.Key, pair.Value))
+                    return false;
+            }
             return true;
         }
 
@@ -430,31 +603,6 @@ namespace DfoServer.Game.Dungeon
                 }
             }
 
-            return true;
-        }
-
-        private static bool HasRequiredItems(
-            InventoryService inventory,
-            IReadOnlyList<DungeonEntryItemRequirement> requiredItems)
-        {
-            if (inventory == null
-                || !TryNormalizeRequiredItems(
-                    requiredItems,
-                    out var requiredCounts,
-                    out _,
-                    out _))
-            {
-                return false;
-            }
-
-            foreach (var requirement in requiredCounts)
-            {
-                if (inventory.CountMainItem(requirement.Key)
-                    < requirement.Value)
-                {
-                    return false;
-                }
-            }
             return true;
         }
 
@@ -562,6 +710,11 @@ namespace DfoServer.Game.Dungeon
         public int RequiredCount;
         public int AvailableCount;
         public int AlternativeIndex = -1;
+        public int GoldCost;
+        public int GoldBefore;
+        public int GoldAfter;
+        public List<int> SelectedAlternativeIndexes { get; } =
+            new List<int>();
         public List<ItemConsumeUpdate> ConsumedItems { get; } = new List<ItemConsumeUpdate>();
 
         internal EntryCostResult Fail(

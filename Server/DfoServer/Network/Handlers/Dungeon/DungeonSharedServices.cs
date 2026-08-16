@@ -141,9 +141,11 @@ namespace DfoServer.Network.Handlers.Dungeon
             TownReturn = new DungeonTownReturnCoordinator(
                 InstanceRegistry,
                 ProgressNotifications);
+            EntryCost = new Game.Dungeon.DungeonEntryCostService();
             Tournaments =
                 new Game.Dungeon.Tournament
-                    .TournamentDungeonApplicationService();
+                    .TournamentDungeonApplicationService(
+                        entryCosts: EntryCost);
             BloodAltars =
                 new Game.Dungeon.BloodAltar
                     .BloodAltarDungeonApplicationService();
@@ -179,7 +181,6 @@ namespace DfoServer.Network.Handlers.Dungeon
             TowerOfDespairRewards =
                 new Game.Dungeon.TowerOfDespairRewardGrantService();
             CardRewards = new CardRewardCoordinator();
-            EntryCost = new Game.Dungeon.DungeonEntryCostService();
             AdmissionRejects = new DungeonAdmissionRejectSender();
         }
     }

@@ -12,12 +12,16 @@ namespace DfoServer.Game.Dungeon.Tournament
     internal sealed class TournamentDungeonApplicationService
     {
         private readonly Func<InventoryLease, bool> _persistInventory;
+        private readonly DungeonEntryCostService _entryCosts;
 
         internal TournamentDungeonApplicationService(
-            Func<InventoryLease, bool> persistInventory = null)
+            Func<InventoryLease, bool> persistInventory = null,
+            DungeonEntryCostService entryCosts = null)
         {
             _persistInventory = persistInventory
                 ?? InventoryPersistenceService.SaveDirty;
+            _entryCosts = entryCosts
+                ?? new DungeonEntryCostService(_persistInventory);
         }
 
         internal bool TryPrepareRun(
@@ -356,90 +360,52 @@ namespace DfoServer.Game.Dungeon.Tournament
                 return false;
             }
 
-            var requiredCounts = new Dictionary<int, int>();
-            var itemSnapshots = new Dictionary<short, ItemCore>();
-            var virtualSnapshots = new Dictionary<short, VirtualCountItem>();
-            lock (lease.SyncRoot)
+            var requirements = new List<DungeonEntryItemRequirement>(
+                definition.EntryItems.Count);
+            foreach (var entry in definition.EntryItems)
             {
-                foreach (var entry in definition.EntryItems)
-                {
-                    if (!entry.ConsumeOnEntry)
-                        continue;
-                    if (entry.ItemId <= 0 || entry.Count <= 0)
-                    {
-                        rejection = DungeonAdmissionReject.DungeonUnavailable;
-                        failureReason =
-                            $"entry item is invalid item={entry.ItemId} count={entry.Count}";
-                        return false;
-                    }
-
-                    var total = (long)(requiredCounts.TryGetValue(
-                        entry.ItemId,
-                        out var current) ? current : 0) + entry.Count;
-                    if (total > int.MaxValue)
-                    {
-                        rejection = DungeonAdmissionReject.DungeonUnavailable;
-                        failureReason =
-                            $"entry item count overflow item={entry.ItemId}";
-                        return false;
-                    }
-                    requiredCounts[entry.ItemId] = (int)total;
-                }
-
-                foreach (var requirement in requiredCounts)
-                {
-                    if (lease.Inventory.CountMainItem(requirement.Key)
-                        < requirement.Value)
-                    {
-                        rejection = DungeonAdmissionReject
-                            .MissingRequiredItem(missingMemberSlot);
-                        failureReason =
-                            $"entry item missing item={requirement.Key} " +
-                            $"need={requirement.Value}";
-                        return false;
-                    }
-
-                    CaptureEntryItemSnapshot(
-                        lease.Inventory,
-                        requirement.Key,
-                        itemSnapshots,
-                        virtualSnapshots);
-                }
-
-                foreach (var requirement in requiredCounts)
-                {
-                    if (!lease.Inventory.TryConsumeMainItem(
-                            requirement.Key,
-                            requirement.Value,
-                            out var consumed)
-                        || !consumed.Success)
-                    {
-                        RestoreEntryItems(
-                            lease.Inventory,
-                            itemSnapshots,
-                            virtualSnapshots);
-                        rejection = DungeonAdmissionReject.Unknown;
-                        failureReason =
-                            $"entry item consume failed item={requirement.Key}";
-                        return false;
-                    }
-                    changes.AddRange(consumed.Changes);
-                }
-
-                if (!_persistInventory(lease))
-                {
-                    RestoreEntryItems(
-                        lease.Inventory,
-                        itemSnapshots,
-                        virtualSnapshots);
-                    changes = new InventoryMutationSet();
-                    rejection = DungeonAdmissionReject.Unknown;
-                    failureReason = "entry item persistence failed";
-                    return false;
-                }
+                requirements.Add(new DungeonEntryItemRequirement(
+                    entry.ItemId,
+                    entry.Count,
+                    entry.ConsumeOnEntry));
             }
 
+            var result = _entryCosts.TryConsumeRequiredItems(
+                lease,
+                requirements);
+            if (!result.Success)
+            {
+                rejection = ResolveEntryCostReject(
+                    result.FailureKind,
+                    missingMemberSlot);
+                failureReason = result.FailReason;
+                return false;
+            }
+
+            foreach (var update in result.ConsumedItems)
+                changes.AddSlot(InventoryListType.Main, update.SlotIndex);
             return true;
+        }
+
+        private static DungeonAdmissionReject ResolveEntryCostReject(
+            EntryCostFailureKind failureKind,
+            byte missingMemberSlot)
+        {
+            switch (failureKind)
+            {
+                case EntryCostFailureKind.MissingRequiredItem:
+                    return DungeonAdmissionReject.MissingRequiredItem(
+                        missingMemberSlot);
+                case EntryCostFailureKind.Unavailable:
+                    return DungeonAdmissionReject.DungeonUnavailable;
+                case EntryCostFailureKind.MissingPermission:
+                    return DungeonAdmissionReject.MissingPermission(
+                        missingMemberSlot);
+                case EntryCostFailureKind.InvalidState:
+                case EntryCostFailureKind.None:
+                default:
+                    return DungeonAdmissionReject.Unknown;
+            }
         }
 
         internal bool TryDeliverReward(
@@ -716,53 +682,6 @@ namespace DfoServer.Game.Dungeon.Tournament
                 foreach (var actor in source)
                     result.Add(actor);
             return result;
-        }
-
-        private static void CaptureEntryItemSnapshot(
-            InventoryService inventory,
-            int itemId,
-            IDictionary<short, ItemCore> itemSnapshots,
-            IDictionary<short, VirtualCountItem> virtualSnapshots)
-        {
-            if (InventoryService.TryResolveMainVirtualSlotByItemId(
-                    itemId,
-                    out var virtualSlot,
-                    out _))
-            {
-                var current = inventory.GetMainVirtualCount(virtualSlot);
-                if (current != null && !virtualSnapshots.ContainsKey(virtualSlot))
-                    virtualSnapshots[virtualSlot] = current.Copy();
-                return;
-            }
-
-            foreach (var item in inventory.GetItems(InventoryListType.Main))
-            {
-                if (item.Value != null
-                    && item.Value.ItemId == itemId
-                    && !itemSnapshots.ContainsKey(item.Key))
-                {
-                    itemSnapshots[item.Key] = item.Value.Copy();
-                }
-            }
-        }
-
-        private static void RestoreEntryItems(
-            InventoryService inventory,
-            IReadOnlyDictionary<short, ItemCore> itemSnapshots,
-            IReadOnlyDictionary<short, VirtualCountItem> virtualSnapshots)
-        {
-            foreach (var pair in itemSnapshots)
-                inventory.SetItem(
-                    InventoryListType.Main,
-                    pair.Key,
-                    pair.Value?.Copy());
-            foreach (var pair in virtualSnapshots)
-            {
-                inventory.SetMainVirtualCount(
-                    pair.Key,
-                    pair.Value.ItemId,
-                    pair.Value.Count);
-            }
         }
 
         private sealed class InventoryMutationSnapshot

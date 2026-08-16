@@ -126,12 +126,15 @@ namespace DfoServer.Network.Handlers.Dungeon
                         $"error={towerProgressError?.Message}");
                 }
                 await _svc.PersistentMechanisms.RestoreBeforeSelectionAsync(session);
+                var hellPartySelection = BuildHellPartySelectionState(
+                    session.Player);
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                     0x00,
                     0x001B,
                     EnterSelectDungeonStateBuilder.BuildEnterSelectDungeon(
-                        session.Player,
-                        towerOfDespairFloor)));
+                        hellPartySelection.UserIds,
+                        towerOfDespairFloor,
+                        hellPartySelection.BlockedSlots)));
                 await _svc.GrowthCapsuleSync.SendExpProgressAsync(
                     session, "enter-select-dungeon", honor: honorSummary);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] ENTER_SELECT_DUNGEON: state packets and account EXP progress sent OK");
@@ -208,6 +211,97 @@ namespace DfoServer.Network.Handlers.Dungeon
                 y,
                 player.CurDirection,
                 player.CurAreaState));
+        }
+
+        private HellPartySelectionState BuildHellPartySelectionState(
+            Game.Session.PlayerContext player)
+        {
+            var state = new HellPartySelectionState();
+            var party = _svc.PartyManager?.GetPartyByUser(player.UserId);
+            if (party == null || party.Count == 0)
+            {
+                state.Members.Add(new HellPartySelectionMember
+                {
+                    UserId = player.UserId,
+                    CharacterId = player.CharacterId,
+                    SlotIndex = 0,
+                });
+            }
+            else
+            {
+                foreach (var member in party.MembersBySlot())
+                {
+                    state.Members.Add(new HellPartySelectionMember
+                    {
+                        UserId = member.UserId,
+                        CharacterId = member.CharacterId,
+                        SlotIndex = member.SlotIndex,
+                    });
+                }
+            }
+
+            if (Town.TryGetDungeonGateWorldMapAreaId(
+                    player.CurTownId,
+                    player.CurAreaId,
+                    out var worldMapAreaId))
+            {
+                state.WorldMapArea = WorldMap.GetAreaById(worldMapAreaId);
+            }
+
+            foreach (var member in state.Members)
+            {
+                state.UserIds.Add(member.UserId);
+                if (state.WorldMapArea?.HellDungeon != true)
+                    continue;
+
+                try
+                {
+                    if (_svc.EntryCost.CheckHellQuestRequirement(
+                            member.CharacterId,
+                            state.WorldMapArea,
+                            out var missingQuestId))
+                    {
+                        continue;
+                    }
+
+                    state.BlockedSlots.Add(member.SlotIndex);
+                    state.BlockReasons.Add(
+                        $"slot={member.SlotIndex}:quest={missingQuestId}");
+                }
+                catch (Exception ex)
+                {
+                    // A missing quest state must not be advertised as unlocked.
+                    state.BlockedSlots.Add(member.SlotIndex);
+                    state.BlockReasons.Add(
+                        $"slot={member.SlotIndex}:error={ex.Message}");
+                }
+            }
+
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"ENTER_SELECT_DUNGEON hell eligibility: " +
+                $"cid={player.CharacterId} worldMapArea=" +
+                $"{state.WorldMapArea?.AreaId ?? -1} " +
+                $"hell={state.WorldMapArea?.HellDungeon == true} " +
+                $"blocked=[{string.Join(",", state.BlockReasons)}]");
+            return state;
+        }
+
+        private sealed class HellPartySelectionState
+        {
+            internal WorldMapArea WorldMapArea;
+            internal List<HellPartySelectionMember> Members { get; } =
+                new List<HellPartySelectionMember>();
+            internal List<ushort> UserIds { get; } = new List<ushort>();
+            internal List<ushort> BlockedSlots { get; } = new List<ushort>();
+            internal List<string> BlockReasons { get; } = new List<string>();
+        }
+
+        private sealed class HellPartySelectionMember
+        {
+            internal ushort UserId;
+            internal int CharacterId;
+            internal ushort SlotIndex;
         }
 
         internal Task HandleSelectDungeon(
@@ -378,6 +472,25 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     return;
                 }
+                var towerEntryCost = TryConsumeDeathTowerEntryCost(
+                    session,
+                    tower);
+                if (!towerEntryCost.Success)
+                {
+                    FileLogger.Log(
+                        $"[{DungeonSharedServices.ProtocolLogName}] " +
+                        $"SELECT_DUNGEON tower entry item rejected: " +
+                        $"cid={session.Player.CharacterId} " +
+                        $"dungeon={req.DungeonId} " +
+                        $"reason={towerEntryCost.FailReason}");
+                    await _svc.AdmissionRejects.SendAsync(
+                        session,
+                        header.type,
+                        ResolveHellEntryReject(
+                            towerEntryCost,
+                            ResolvePartySlot(session)));
+                    return;
+                }
                 DungeonRunLifecycle.BeginTowerRun(
                     session,
                     req.DungeonId,
@@ -390,6 +503,20 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return;
                 RegisterActiveParticipant(session, towerRun);
                 var towerRunIdentity = towerRun.CaptureIdentity();
+                await SendEntryCostItemUpdates(
+                    session,
+                    towerRunIdentity,
+                    towerEntryCost,
+                    "death-tower-ticket");
+                if (!session.Player.IsCurrentDungeonRun(towerRunIdentity))
+                    return;
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON tower entry item accepted: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"dungeon={req.DungeonId} " +
+                    $"alternative={towerEntryCost.AlternativeIndex} " +
+                    $"updates={towerEntryCost.ConsumedItems.Count}");
                 await _svc.DeathTower.SendEntryPacketsAsync(session, tower, req.Difficulty);
                 if (!session.Player.IsCurrentDungeonRun(towerRunIdentity))
                     return;
@@ -475,6 +602,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 return;
             }
+            if (!await PreparePvfRequiredItemEntryAsync(
+                    session,
+                    header.type,
+                    run))
+            {
+                return;
+            }
             if (!await PrepareBloodAltarEntryAsync(
                     session,
                     header,
@@ -483,8 +617,16 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
             ConfigureLinkedDungeonRunState(req.DungeonId, run);
-            if (run.HellMode)
-                await PrepareManualHellPartyAsync(session, req, selection.Maze, selection.Index);
+            if (run.HellMode
+                && !await PrepareManualHellPartyAsync(
+                    session,
+                    header.type,
+                    req,
+                    selection.Maze,
+                    selection.Index))
+            {
+                return;
+            }
             if (!session.Player.IsCurrentDungeonRun(runIdentity))
                 return;
 
@@ -1110,6 +1252,171 @@ namespace DfoServer.Network.Handlers.Dungeon
             return true;
         }
 
+        private EntryCostResult TryConsumeDeathTowerEntryCost(
+            EnhancedClientSession session,
+            Game.DeathTower.DeathTowerSession tower)
+        {
+            var result = new EntryCostResult();
+            var config = tower?.Config;
+            if (config == null)
+            {
+                return result.Fail(
+                    "death tower definition is missing",
+                    EntryCostFailureKind.Unavailable);
+            }
+
+            var alternatives =
+                new List<IReadOnlyList<DungeonEntryItemRequirement>>();
+            AddTowerEntryAlternative(
+                alternatives,
+                config.RequiredEntryItems);
+            AddTowerEntryAlternative(
+                alternatives,
+                config.AddedRequiredEntryItems);
+            if (alternatives.Count == 0)
+            {
+                result.Success = true;
+                return result;
+            }
+
+            if (!TryGetOwnedInventoryLease(session, out var lease))
+            {
+                return result.Fail(
+                    "owned inventory lease is missing",
+                    EntryCostFailureKind.InvalidState);
+            }
+
+            return _svc.EntryCost.TryConsumePreferredAlternative(
+                lease,
+                alternatives);
+        }
+
+        private static void AddTowerEntryAlternative(
+            ICollection<IReadOnlyList<DungeonEntryItemRequirement>>
+                alternatives,
+            IReadOnlyList<Game.DeathTower.DeathTowerData.TowerEntryItem>
+                source)
+        {
+            if (alternatives == null || source == null || source.Count == 0)
+                return;
+
+            var requirements = new List<DungeonEntryItemRequirement>(
+                source.Count);
+            foreach (var item in source)
+            {
+                requirements.Add(new DungeonEntryItemRequirement(
+                    item.ItemId,
+                    item.Count,
+                    item.ConsumeOnEntry));
+            }
+            alternatives.Add(requirements);
+        }
+
+        private async Task<bool> PreparePvfRequiredItemEntryAsync(
+            EnhancedClientSession session,
+            ushort wireType,
+            DungeonRun run)
+        {
+            if (run == null)
+                return false;
+
+            // Tournament definitions are also sourced from DGN [required item],
+            // but their coordinator has already routed the same definition
+            // through the shared entry-cost service above.
+            if (_svc.Tournaments.IsTournamentRun(run))
+                return true;
+
+            PvfLib.DungeonFile dungeonFile;
+            try
+            {
+                dungeonFile = DungeonData.GetDungeonFile(run.DungeonId);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON required item definition failed: " +
+                    $"dungeon={run.DungeonId} error={ex.Message}");
+                var unavailableSelection = await DungeonRunLifecycle
+                    .RejectSelectingRunAsync(
+                        session,
+                        run.CaptureIdentity(),
+                        _svc.InstanceRegistry);
+                if (unavailableSelection != null)
+                {
+                    await _svc.AdmissionRejects.SendAsync(
+                        session,
+                        wireType,
+                        DungeonAdmissionReject.DungeonUnavailable);
+                }
+                return false;
+            }
+
+            if (dungeonFile?.RequiredItems == null
+                || dungeonFile.RequiredItems.Count == 0)
+            {
+                return true;
+            }
+
+            var requirements = DungeonEntryCostService
+                .ProjectPvfRequiredItems(dungeonFile.RequiredItems);
+
+            EntryCostResult result;
+            if (!TryGetOwnedInventoryLease(session, out var lease))
+            {
+                result = new EntryCostResult().Fail(
+                    "owned inventory lease is missing",
+                    EntryCostFailureKind.InvalidState);
+            }
+            else
+            {
+                result = _svc.EntryCost.TryConsumeRequiredItems(
+                    lease,
+                    requirements);
+            }
+
+            if (!result.Success)
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON required item rejected: " +
+                    $"cid={session?.Player?.CharacterId ?? 0} " +
+                    $"dungeon={run.DungeonId} reason={result.FailReason}");
+                var rejectedSelection = await DungeonRunLifecycle
+                    .RejectSelectingRunAsync(
+                        session,
+                        run.CaptureIdentity(),
+                        _svc.InstanceRegistry);
+                if (rejectedSelection != null)
+                {
+                    await _svc.AdmissionRejects.SendAsync(
+                        session,
+                        wireType,
+                        ResolveHellEntryReject(
+                            result,
+                            ResolvePartySlot(session)));
+                }
+                return false;
+            }
+
+            var runIdentity = run.CaptureIdentity();
+            await SendEntryCostItemUpdates(
+                session,
+                runIdentity,
+                result,
+                "required-item");
+            if (!session.Player.IsCurrentDungeonRun(runIdentity))
+                return false;
+
+            FileLogger.Log(
+                $"[{DungeonSharedServices.ProtocolLogName}] " +
+                $"SELECT_DUNGEON required item accepted: " +
+                $"cid={session.Player.CharacterId} dungeon={run.DungeonId} " +
+                $"requirements={requirements.Count} " +
+                $"updates={result.ConsumedItems.Count}");
+            return true;
+        }
+
         private async Task<bool> PrepareBloodAltarEntryAsync(
             EnhancedClientSession session,
             GamePacketHeader header,
@@ -1159,15 +1466,16 @@ namespace DfoServer.Network.Handlers.Dungeon
             return member?.SlotIndex ?? 0;
         }
 
-        private async Task PrepareManualHellPartyAsync(
+        private async Task<bool> PrepareManualHellPartyAsync(
             EnhancedClientSession session,
+            ushort wireType,
             Network.Parsers.Dungeon.SelectDungeonRequest req,
             PvfLib.MazeInfo maze,
             int mazeIndex)
         {
             var run = session.Player.CurrentRun;
             if (run == null)
-                return;
+                return false;
             var runIdentity = run.CaptureIdentity();
             var area = WorldMap.GetAreaByDungeonId(req.DungeonId);
             var dungeonMinLevel = DungeonData.GetDungeonMinimumRequiredLevel(req.DungeonId);
@@ -1178,9 +1486,13 @@ namespace DfoServer.Network.Handlers.Dungeon
             var gorgeousCanApply = false;
             if (!TryGetOwnedInventoryLease(session, out var inventoryLease))
             {
-                DisableCurrentHellParty(run);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: online inventory missing for hell entry cid={session.Player.CharacterId}");
-                return;
+                await RejectManualHellPartyEntryAsync(
+                    session,
+                    wireType,
+                    run,
+                    DungeonAdmissionReject.InvalidSelectionState);
+                return false;
             }
 
             if (session.Player.HellPartyGorgeousChallengeEnabled)
@@ -1208,22 +1520,31 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             if (hellRoom == null || !hellRoom.Found)
             {
-                DisableCurrentHellParty(run);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: hell requested but no hell map found dungeon={req.DungeonId}");
-                return;
+                await RejectManualHellPartyEntryAsync(
+                    session,
+                    wireType,
+                    run,
+                    DungeonAdmissionReject.DungeonUnavailable);
+                return false;
             }
 
             EntryCostResult ticketResult;
-            lock (inventoryLease.SyncRoot)
-                ticketResult = _svc.EntryCost.TryConsumeAbyssPartyTicket(
-                    inventoryLease.Inventory,
-                    area,
-                    dungeonMinLevel);
+            ticketResult = _svc.EntryCost.TryConsumeAbyssPartyTicket(
+                inventoryLease,
+                area,
+                dungeonMinLevel);
             if (!ticketResult.Success)
             {
-                DisableCurrentHellParty(run);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: hell ticket check failed dungeon={req.DungeonId} area={area?.AreaId ?? -1} minLevel={dungeonMinLevel} reason={ticketResult.FailReason}");
-                return;
+                await RejectManualHellPartyEntryAsync(
+                    session,
+                    wireType,
+                    run,
+                    ResolveHellEntryReject(
+                        ticketResult,
+                        ResolvePartySlot(session)));
+                return false;
             }
 
             var gorgeousApplied = false;
@@ -1249,46 +1570,79 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: hell room=({hellRoom.X},{hellRoom.Y}) map={hellRoom.MapId} normalMap={hellRoom.NormalMapId} waves={hellRoom.Waves.Count} requestFlag={req.HellPartyRequestFlag} difficultyFlag={req.HellPartyDifficultyFlag} mode={run.HellPartyMode} veryDifficult={run.VeryDifficultHell} area={area?.AreaId ?? -1} minLevel={dungeonMinLevel} ticket={(ticketResult.IsFreePass ? "freepass" : "normal")} updates={ticketResult.ConsumedItems.Count}");
 
-            await SendHellPartyTicketUpdates(
+            await SendEntryCostItemUpdates(
                 session,
                 runIdentity,
-                ticketResult);
+                ticketResult,
+                "hell-ticket");
             if (!session.Player.IsCurrentDungeonRun(runIdentity))
-                return;
+                return false;
             if (gorgeousApplied && gorgeousGoldAfter >= 0)
             {
                 if (_svc.InventoryRefresh != null)
                     await _svc.InventoryRefresh.SendGoldUpdate(session);
                 FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: gorgeous challenge applied cost={GorgeousChallengeGoldCost} gold={gorgeousGoldBefore}->{gorgeousGoldAfter}");
             }
+            return session.Player.IsCurrentDungeonRun(runIdentity);
         }
 
-        private async Task SendHellPartyTicketUpdates(
+        private async Task RejectManualHellPartyEntryAsync(
+            EnhancedClientSession session,
+            ushort wireType,
+            DungeonRun run,
+            DungeonAdmissionReject rejection)
+        {
+            if (run == null)
+                return;
+
+            var selection = await DungeonRunLifecycle.RejectSelectingRunAsync(
+                session,
+                run.CaptureIdentity(),
+                _svc.InstanceRegistry);
+            if (selection != null)
+                await _svc.AdmissionRejects.SendAsync(
+                    session,
+                    wireType,
+                    rejection);
+        }
+
+        internal static DungeonAdmissionReject ResolveHellEntryReject(
+            EntryCostResult result,
+            byte memberSlot)
+        {
+            switch (result?.FailureKind ?? EntryCostFailureKind.InvalidState)
+            {
+                case EntryCostFailureKind.MissingRequiredItem:
+                    return DungeonAdmissionReject.MissingRequiredItem(memberSlot);
+                case EntryCostFailureKind.MissingPermission:
+                    return DungeonAdmissionReject.MissingPermission(memberSlot);
+                case EntryCostFailureKind.Unavailable:
+                    return DungeonAdmissionReject.DungeonUnavailable;
+                case EntryCostFailureKind.InvalidState:
+                case EntryCostFailureKind.None:
+                default:
+                    return DungeonAdmissionReject.InvalidSelectionState;
+            }
+        }
+
+        private async Task SendEntryCostItemUpdates(
             EnhancedClientSession session,
             DungeonRunIdentity runIdentity,
-            EntryCostResult ticketResult)
+            EntryCostResult entryCost,
+            string source)
         {
-            foreach (var update in ticketResult.ConsumedItems)
+            foreach (var update in entryCost.ConsumedItems)
             {
                 if (!session.Player.IsCurrentDungeonRun(runIdentity))
                     return;
                 if (_svc.InventoryRefresh != null)
                     await _svc.InventoryRefresh.SendUpdateItemList(session, InventoryListType.Main, update.SlotIndex);
-                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] SELECT_DUNGEON: hell ticket consumed item={update.ItemId} count={update.Count} slot={update.SlotIndex} remain={update.RemainingCount}");
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON: entry cost consumed source={source} " +
+                    $"item={update.ItemId} count={update.Count} " +
+                    $"slot={update.SlotIndex} remain={update.RemainingCount}");
             }
-        }
-
-        private static void DisableCurrentHellParty(DungeonRun run)
-        {
-            if (run == null) return;
-            run.HellMode = false;
-            run.HellPartyMode = 0;
-            run.VeryDifficultHell = false;
-            run.HellGorgeousChallenge = false;
-            run.HellMapId = -1;
-            run.HellMapX = 0xFF;
-            run.HellMapY = 0xFF;
-            run.HellRoomInfo = null;
         }
 
         private static void WarmUpDropConfigs(bool includeHellParty)

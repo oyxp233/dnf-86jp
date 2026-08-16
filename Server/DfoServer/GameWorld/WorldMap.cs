@@ -52,6 +52,17 @@ namespace DfoServer.GameWorld
             return area;
         }
 
+        public static WorldMapArea GetAreaById(int areaId)
+        {
+            foreach (var area in Index.Value.Areas)
+            {
+                if (area.AreaId == areaId)
+                    return area;
+            }
+
+            return null;
+        }
+
         public static bool IsTaskExclusiveDungeon(int dungeonId)
         {
             if (Index.Value.AdmissionsByDungeonId.TryGetValue(

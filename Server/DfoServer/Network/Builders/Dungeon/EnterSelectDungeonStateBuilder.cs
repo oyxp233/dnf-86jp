@@ -30,17 +30,37 @@ namespace DfoServer.Network.Builders
             int towerOfDespairFloor)
             => BuildEnterSelectDungeon(
                 new[] { player.UserId },
-                towerOfDespairFloor);
+                towerOfDespairFloor,
+                hellQuestBlockedSlots: null);
 
         public static byte[] BuildEnterSelectDungeon(
             IReadOnlyList<ushort> userIds,
             int towerOfDespairFloor)
+            => BuildEnterSelectDungeon(
+                userIds,
+                towerOfDespairFloor,
+                hellQuestBlockedSlots: null);
+
+        public static byte[] BuildEnterSelectDungeon(
+            IReadOnlyList<ushort> userIds,
+            int towerOfDespairFloor,
+            IReadOnlyList<ushort> hellQuestBlockedSlots)
         {
             var writer = new GamePacketWriter();
             var count = userIds?.Count ?? 0;
+            var blockedCount = hellQuestBlockedSlots?.Count ?? 0;
 
             writer.WriteInt32(0x01);
-            writer.WriteUInt16(0x0000);
+            // The original server writes the number of party slots that have
+            // not cleared this world-map area's [hell quest], followed by the
+            // blocked slot indexes. The client uses this list to disable the
+            // "challenge hell party" button before SELECT_DUNGEON is sent.
+            writer.WriteByte((byte)blockedCount);
+            for (var i = 0; i < blockedCount; i++)
+                writer.WriteUInt16(hellQuestBlockedSlots[i]);
+
+            // Reserved byte present in the JP86 0x001B layout.
+            writer.WriteByte(0x00);
             writer.WriteByte((byte)count);
             for (var i = 0; i < count; i++)
             {

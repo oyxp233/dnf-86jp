@@ -93,6 +93,23 @@ namespace DfoServer.SelfTests
                 && BitConverter.ToUInt16(returnAck, 1) == 0x002A
                 && returnAck[15] == 0x01,
                 ref failures);
+
+            var missingHellTicket = new EntryCostResult().Fail(
+                "ticket missing normalNeed=24",
+                EntryCostFailureKind.MissingRequiredItem);
+            var missingHellTicketReject = DungeonEntryHandler
+                .ResolveHellEntryReject(missingHellTicket, memberSlot: 2);
+            var missingHellTicketAck = Network.Builders
+                .DungeonAdmissionRejectBuilder.Build(missingHellTicketReject);
+            Check("missing hell ticket rejects SELECT_DUNGEON for the affected party slot",
+                missingHellTicketReject.Reason
+                    == DungeonAdmissionRejectReason.MissingRequiredItem
+                && missingHellTicketReject.MemberSlot == 2
+                && missingHellTicketAck.Length == 3
+                && missingHellTicketAck[0] == 0
+                && missingHellTicketAck[1] == 0x11
+                && missingHellTicketAck[2] == 2,
+                ref failures);
             // 2. 新局字段默认值 = 旧版返城重置后的取值(常量表)
             var fresh = new DungeonRun();
             Check("fresh run fields carry legacy reset defaults",

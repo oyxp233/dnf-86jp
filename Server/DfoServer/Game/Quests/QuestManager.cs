@@ -171,6 +171,10 @@ namespace DfoServer.Game.Quests
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
+            FileLogger.Log(
+                $"[GameProtocol] FINISH_QUEST payload: "
+                + $"{(qBody != null ? BitConverter.ToString(qBody) : "null")} "
+                + $"({qBody?.Length ?? 0}B) cid={cid}");
             InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease);
             var owner = new QuestCommandOwnerContext(
                 cid,

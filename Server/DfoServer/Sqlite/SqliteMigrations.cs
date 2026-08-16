@@ -668,6 +668,27 @@ CREATE TABLE IF NOT EXISTS character_pvp_skills (
     UNIQUE (character_id, page_index, skill_id),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );")),
+
+            (53, "daily challenge entry reward claims", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_daily_challenge_entry_claims (
+    character_id INTEGER NOT NULL,
+    group_index INTEGER NOT NULL CHECK (group_index >= 0 AND group_index < 6),
+    entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+    quest_id INTEGER NOT NULL CHECK (quest_id > 0),
+    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, group_index, entry_index),
+    FOREIGN KEY (character_id, group_index, entry_index)
+        REFERENCES character_daily_challenge_entries(character_id, group_index, entry_index)
+        ON DELETE CASCADE
+);")),
+
+            (54, "project claimed challenge entries into client clear flags", conn => ExecuteBatch(conn, @"
+INSERT INTO character_invisible_falgs (character_id, slot_index, flag_value)
+SELECT character_id, quest_id, 1
+FROM character_daily_challenge_entry_claims
+WHERE 1 = 1
+ON CONFLICT(character_id, slot_index)
+DO UPDATE SET flag_value = excluded.flag_value;")),
         };
 
         private static void MigrateEnchanterEndurance(SqliteConnection connection)

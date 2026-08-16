@@ -16,7 +16,9 @@ namespace DfoServer.SelfTests
     {
         private const int AccountId = 986026;
         private const int CharacterId = 986126;
+        private const int BootstrapCharacterId = 986127;
         private const ushort ChallengeQuestId = 14653;
+        private const ushort RewardChallengeQuestId = 14732;
         private const ushort NormalQuestId = 1791;
 
         public static int Run()
@@ -43,6 +45,43 @@ namespace DfoServer.SelfTests
                 ref failures);
             Check("normal active quest is not classified as daily challenge",
                 !QuestData.IsDailyChallengeQuest(NormalQuestId),
+                ref failures);
+
+            var generated = new DailyChallengeService(connectionString)
+                .EnsureInitialized(BootstrapCharacterId);
+            Check("level-61 character receives PVF groups 0 and 4",
+                generated.Refreshed
+                && generated.Snapshot.RacingDungeonGroups.Count == 2
+                && generated.Snapshot.RacingDungeonGroups[0].GroupId == 0
+                && generated.Snapshot.RacingDungeonGroups[1].GroupId == 4,
+                ref failures);
+            Check("PVF level table creates five regular and eight special entries",
+                generated.Snapshot.RacingDungeonGroups[0].Entries.Count == 5
+                && generated.Snapshot.RacingDungeonGroups[1].Entries.Count == 8
+                && generated.EntryCount == 13,
+                ref failures);
+            Check("generated entries are challenge quests with initialized targets",
+                AllGeneratedEntriesValid(generated.Snapshot),
+                ref failures);
+
+            var repeated = new DailyChallengeService(connectionString)
+                .EnsureInitialized(BootstrapCharacterId);
+            Check("same-day initialization preserves the existing ledger",
+                !repeated.Refreshed
+                && SameGeneratedEntries(generated.Snapshot, repeated.Snapshot),
+                ref failures);
+
+            MarkBootstrapLedgerCompletedAndAdvanceDay(connectionString);
+            var rolled = new DailyChallengeService(connectionString)
+                .EnsureInitialized(BootstrapCharacterId);
+            Check("daily rollover regenerates progress and clears reward claims",
+                rolled.Refreshed
+                && AllGeneratedEntriesValid(rolled.Snapshot)
+                && rolled.Snapshot.DailyChallengeRewardClaimFlags[4] == 0
+                && !AnyEntryClaimed(connectionString, BootstrapCharacterId)
+                && !HasChallengeClearedFlag(
+                    connectionString,
+                    BootstrapCharacterId),
                 ref failures);
 
             var selectInit = new Game.SelectCharacter.SelectCharacterInitializationSnapshot
@@ -251,7 +290,96 @@ namespace DfoServer.SelfTests
                 InventoryContext.Unregister(sessionId, CharacterId);
             }
 
-            CompleteRewardGroup(connectionString);
+            SeedCompletedEntryReward(connectionString);
+            var entryRewardSessionId = Guid.NewGuid();
+            var entryRewardInventory = new InventoryService(CharacterId, AccountId);
+            if (!InventoryRewardGrantService.TryGrant(
+                    entryRewardInventory,
+                    InventoryRewardGrantRequest.Create(
+                        3309,
+                        9,
+                        ItemCreateReason.AdminGrant),
+                    out var requirementGrant)
+                || !requirementGrant.Success)
+            {
+                throw new InvalidOperationException(
+                    "daily challenge entry requirement fixture failed");
+            }
+            entryRewardInventory.ClearDirtyState();
+            InventoryContext.Register(entryRewardSessionId, entryRewardInventory);
+            try
+            {
+                rebuiltSender.Reset();
+                var entryRewardManager = new QuestManager(
+                    rebuiltSender,
+                    connectionString);
+                entryRewardManager.HandleFinishQuestAsync(
+                        0x0022,
+                        BuildWireFinishBody(RewardChallengeQuestId),
+                        entryRewardSessionId)
+                    .GetAwaiter()
+                    .GetResult();
+                Check("completed challenge entry reuses normal QST reward transaction",
+                    entryRewardInventory.CountMainItem(3309) == 0
+                    && entryRewardInventory.CountMainItem(3300) == 4,
+                    ref failures);
+                Check("challenge entry reward persists a dedicated idempotency claim",
+                    ReadEntryClaimed(connectionString, RewardChallengeQuestId),
+                    ref failures);
+                Check("challenge entry reward emits a normal FINISH_QUEST success ACK",
+                    rebuiltSender.LastAckBody?.Length > 3
+                    && rebuiltSender.LastAckBody[0] == 1
+                    && BitConverter.ToUInt16(
+                        rebuiltSender.LastAckBody,
+                        1) == RewardChallengeQuestId,
+                    ref failures);
+
+                rebuiltSender.Reset();
+                entryRewardManager.HandleFinishQuestAsync(
+                        0x0022,
+                        BuildWireFinishBody(RewardChallengeQuestId),
+                        entryRewardSessionId)
+                    .GetAwaiter()
+                    .GetResult();
+                Check("replayed challenge entry reward cannot duplicate items",
+                    BitConverter.ToString(rebuiltSender.LastAckBody) == "00-16"
+                    && entryRewardInventory.CountMainItem(3300) == 4,
+                    ref failures);
+                Check("challenge reward projects a relog flag without an active quest",
+                    !HasActiveQuest(
+                        connectionString,
+                        RewardChallengeQuestId)
+                    && HasClearedFlag(
+                        connectionString,
+                        CharacterId,
+                        RewardChallengeQuestId),
+                    ref failures);
+
+                var entryReset = new DailyChallengeService(connectionString)
+                    .ResetCharacter(CharacterId);
+                Check("daily reset clears entry claims and restores its target",
+                    entryReset.ChangedEntries == 1
+                    && entryReset.ClearedClaims == 1
+                    && !ReadEntryClaimed(
+                        connectionString,
+                        RewardChallengeQuestId)
+                    && !HasClearedFlag(
+                        connectionString,
+                        CharacterId,
+                        RewardChallengeQuestId)
+                    && ReadUInt32(
+                        connectionString,
+                        "SELECT value_b FROM character_daily_challenge_entries "
+                        + "WHERE character_id=@cid AND track_like_id=@id;",
+                        RewardChallengeQuestId) == 1,
+                    ref failures);
+            }
+            finally
+            {
+                InventoryContext.Unregister(entryRewardSessionId, CharacterId);
+            }
+
+            SeedCompletedRewardGroup(connectionString);
             var fullSessionId = Guid.NewGuid();
             var fullInventory = BuildFullInventory();
             InventoryContext.Register(fullSessionId, fullInventory);
@@ -285,6 +413,108 @@ namespace DfoServer.SelfTests
             body[4] = 0;
             body[5] = increment ? (byte)1 : (byte)0;
             return body;
+        }
+
+        private static byte[] BuildWireFinishBody(ushort questId)
+        {
+            var body = new byte[10];
+            BitConverter.GetBytes((ushort)0x0022).CopyTo(body, 0);
+            BitConverter.GetBytes(questId).CopyTo(body, 2);
+            BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 4);
+            BitConverter.GetBytes((ushort)1).CopyTo(body, 6);
+            BitConverter.GetBytes(ushort.MaxValue).CopyTo(body, 8);
+            return body;
+        }
+
+        private static bool AllGeneratedEntriesValid(
+            Game.SelectCharacter.SelectCharacterInitializationSnapshot snapshot)
+        {
+            foreach (var group in snapshot.RacingDungeonGroups)
+            {
+                foreach (var entry in group.Entries)
+                {
+                    if (!QuestData.IsDailyChallengeQuest((int)entry.TrackLikeId)
+                        || entry.ValueA == 0
+                        || entry.ValueB != entry.ValueA)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return snapshot.RacingDungeonGroups.Count > 0;
+        }
+
+        private static bool SameGeneratedEntries(
+            Game.SelectCharacter.SelectCharacterInitializationSnapshot left,
+            Game.SelectCharacter.SelectCharacterInitializationSnapshot right)
+        {
+            if (left.RacingDungeonGroups.Count != right.RacingDungeonGroups.Count)
+                return false;
+
+            for (var groupIndex = 0;
+                groupIndex < left.RacingDungeonGroups.Count;
+                groupIndex++)
+            {
+                var leftGroup = left.RacingDungeonGroups[groupIndex];
+                var rightGroup = right.RacingDungeonGroups[groupIndex];
+                if (leftGroup.GroupId != rightGroup.GroupId
+                    || leftGroup.Entries.Count != rightGroup.Entries.Count)
+                {
+                    return false;
+                }
+
+                for (var entryIndex = 0;
+                    entryIndex < leftGroup.Entries.Count;
+                    entryIndex++)
+                {
+                    if (leftGroup.Entries[entryIndex].TrackLikeId
+                        != rightGroup.Entries[entryIndex].TrackLikeId)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static void MarkBootstrapLedgerCompletedAndAdvanceDay(
+            string connectionString)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+UPDATE character_daily_challenge_entries
+SET value_b = 0
+WHERE character_id = @cid;
+INSERT OR IGNORE INTO character_daily_challenge_entry_claims
+    (character_id, group_index, entry_index, quest_id)
+SELECT character_id, group_index, entry_index, track_like_id
+FROM character_daily_challenge_entries
+WHERE character_id = @cid
+ORDER BY group_index, entry_index
+LIMIT 1;
+INSERT OR REPLACE INTO character_invisible_falgs
+    (character_id, slot_index, flag_value)
+SELECT character_id, track_like_id, 1
+FROM character_daily_challenge_entries
+WHERE character_id = @cid
+ORDER BY group_index, entry_index
+LIMIT 1;
+INSERT OR IGNORE INTO character_daily_challenge_claims
+    (character_id, group_index)
+VALUES (@cid, 4);
+UPDATE character_daily_reset
+SET day_id = day_id - 1
+WHERE character_id = @cid;";
+                    command.Parameters.AddWithValue("@cid", BootstrapCharacterId);
+                    command.ExecuteNonQuery();
+                }
+            }
         }
 
         private static bool IsExpectedSnapshot(byte[] body, uint remaining)
@@ -395,6 +625,37 @@ WHERE character_id = @cid AND group_index = 4;";
             }
         }
 
+        private static void SeedCompletedEntryReward(string connectionString)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+DELETE FROM character_daily_challenge_entry_claims
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_claims
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_entries
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_groups
+WHERE character_id = @cid;
+INSERT INTO character_daily_challenge_groups
+    (character_id, group_index, group_id)
+VALUES (@cid, 0, 0);
+INSERT INTO character_daily_challenge_entries
+    (character_id, group_index, entry_index, track_like_id, value_a, value_b)
+VALUES (@cid, 0, 0, @questId, 1, 0);";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.Parameters.AddWithValue(
+                        "@questId",
+                        RewardChallengeQuestId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
         private static bool ReadClaimed(string connectionString, int groupIndex)
         {
             using (var connection = new SqliteConnection(connectionString))
@@ -413,6 +674,108 @@ WHERE character_id = @cid AND group_index = @groupIndex;";
             }
         }
 
+        private static bool ReadEntryClaimed(
+            string connectionString,
+            ushort questId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT 1
+FROM character_daily_challenge_entry_claims
+WHERE character_id = @cid AND quest_id = @questId;";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.Parameters.AddWithValue("@questId", (int)questId);
+                    return command.ExecuteScalar() != null;
+                }
+            }
+        }
+
+        private static bool HasActiveQuest(
+            string connectionString,
+            ushort questId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT COUNT(*)
+FROM character_active_quests
+WHERE character_id = @cid AND quest_id = @questId;";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.Parameters.AddWithValue("@questId", (int)questId);
+                    return Convert.ToInt32(command.ExecuteScalar()) != 0;
+                }
+            }
+        }
+
+        private static bool HasClearedFlag(
+            string connectionString,
+            int characterId,
+            ushort questId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT 1
+FROM character_invisible_falgs
+WHERE character_id = @cid AND slot_index = @questId;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue("@questId", (int)questId);
+                    return command.ExecuteScalar() != null;
+                }
+            }
+        }
+
+        private static bool AnyEntryClaimed(
+            string connectionString,
+            int characterId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT 1
+FROM character_daily_challenge_entry_claims
+WHERE character_id = @cid
+LIMIT 1;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    return command.ExecuteScalar() != null;
+                }
+            }
+        }
+
+        private static bool HasChallengeClearedFlag(
+            string connectionString,
+            int characterId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT 1
+FROM character_invisible_falgs AS f
+WHERE f.character_id = @cid
+  AND f.slot_index BETWEEN 14000 AND 15000
+LIMIT 1;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    return command.ExecuteScalar() != null;
+                }
+            }
+        }
+
         private static void Seed(string connectionString)
         {
             using (var connection = new SqliteConnection(connectionString))
@@ -425,8 +788,12 @@ INSERT INTO accounts (account_id, m_id, password_hash)
 VALUES (@aid, 'daily-challenge-selftest', '');
 INSERT INTO characters (character_id, account_id, name, level)
 VALUES (@cid, @aid, 'daily-challenge-selftest', 86);
+INSERT INTO characters (character_id, account_id, name, level)
+VALUES (@bootstrapCid, @aid, 'daily-challenge-bootstrap', 61);
 INSERT INTO character_init_flags (character_id, racing_dungeon_current_enter_count)
 VALUES (@cid, 7);
+INSERT INTO character_init_flags (character_id, racing_dungeon_current_enter_count)
+VALUES (@bootstrapCid, 0);
 INSERT INTO character_daily_challenge_groups (character_id, group_index, group_id)
 VALUES (@cid, 0, 5);
 INSERT INTO character_daily_challenge_entries
@@ -436,6 +803,7 @@ INSERT INTO character_daily_challenge_tail_ids (character_id, sort_order, id_val
 VALUES (@cid, 0, 777);";
                     command.Parameters.AddWithValue("@aid", AccountId);
                     command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.Parameters.AddWithValue("@bootstrapCid", BootstrapCharacterId);
                     command.Parameters.AddWithValue("@questId", ChallengeQuestId);
                     command.ExecuteNonQuery();
                 }

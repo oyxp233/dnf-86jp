@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using DfoServer.Game.DailyReset;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
+using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.Quests
@@ -16,10 +18,62 @@ namespace DfoServer.Game.Quests
         private readonly DailyChallengeRepository _repository;
         private readonly string _connectionString;
 
-        internal DailyChallengeService(string connectionString)
+        internal DailyChallengeService(
+            string connectionString,
+            DailyResetService dailyReset = null)
         {
             _connectionString = connectionString;
-            _repository = new DailyChallengeRepository(connectionString);
+            if (dailyReset == null)
+            {
+                var databasePath = new SqliteConnectionStringBuilder(connectionString)
+                    .DataSource;
+                dailyReset = new DailyResetService(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+            }
+
+            _repository = new DailyChallengeRepository(connectionString, dailyReset);
+        }
+
+        internal DailyChallengeInitializationResult EnsureInitialized(
+            int characterId)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+
+            int characterLevel;
+            using (var connection = new SqliteConnection(_connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT level
+FROM characters
+WHERE character_id = @cid;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    var value = command.ExecuteScalar();
+                    if (value == null || value == DBNull.Value)
+                        throw new InvalidOperationException(
+                            $"Daily challenge character not found: {characterId}");
+                    characterLevel = Convert.ToInt32(value);
+                }
+            }
+
+            var plan = DailyChallengeData.BuildGenerationPlan(
+                characterId,
+                characterLevel,
+                DailyResetService.TodayId());
+            var result = _repository.EnsureInitialized(characterId, plan);
+            if (result.Refreshed)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] generated cid={characterId} "
+                    + $"level={characterLevel} groups={result.GroupCount} "
+                    + $"entries={result.EntryCount}");
+            }
+
+            return result;
         }
 
         internal bool TryHandleSetTrigger(

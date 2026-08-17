@@ -32,6 +32,7 @@ namespace DfoServer
             ("--selftest-npc-material-exchange-price", SelfTests.NpcMaterialExchangePriceSelfTest.Run),
             ("--selftest-collectbox-runtime", SelfTests.CollectBoxRuntimeSelfTest.Run),
             ("--selftest-lottery-item", SelfTests.LotteryItemSelfTest.Run),
+            ("--selftest-skill-point-book", SelfTests.SkillPointBookSelfTest.Run),
             ("--selftest-dungeon-map-fallback", SelfTests.DungeonMapFallbackSelfTest.Run),
             ("--selftest-move-map-request", SelfTests.MoveMapRequestSelfTest.Run),
             ("--selftest-tower-of-despair-progress", SelfTests.TowerOfDespairProgressSelfTest.Run),

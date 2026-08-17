@@ -114,12 +114,21 @@ namespace DfoServer.Game.Inventory
                     }
 
                     var definition = ExperienceItemDataProvider.Resolve(resolvedItemId);
-                    if (!definition.IsExperienceLike)
+                    var skillPointBook = SkillPointBookDataProvider.Resolve(resolvedItemId);
+                    if (!definition.IsExperienceLike && !skillPointBook.IsSkillPointBook)
                     {
                         return Reject(
                             ExperienceItemUseStatus.UnsupportedDefinition,
                             resolvedItemId,
-                            "source item is not ordinary character experience");
+                            "source item is neither ordinary character experience nor a skill-point book");
+                    }
+                    if (skillPointBook.IsSkillPointBook && !skillPointBook.IsSupported)
+                    {
+                        return Reject(
+                            ExperienceItemUseStatus.UnsupportedDefinition,
+                            resolvedItemId,
+                            skillPointBook.UnsupportedReason
+                                ?? "skill-point book definition is unsupported");
                     }
 
                     using (var connection = new SqliteConnection(_connectionString))
@@ -156,6 +165,177 @@ namespace DfoServer.Game.Inventory
                                     ExperienceItemUseStatus.InvalidOwner,
                                     resolvedItemId,
                                     "character/account ownership mismatch");
+                            }
+
+                            if (skillPointBook.IsSupported)
+                            {
+                                var skillBookPlan = ValidateSkillPointBookUse(
+                                    skillPointBook,
+                                    currentSource,
+                                    character,
+                                    _timeProvider.UtcNowUnixSeconds());
+                                if (!skillBookPlan.Success)
+                                {
+                                    return Reject(
+                                        skillBookPlan.Status,
+                                        resolvedItemId,
+                                        skillBookPlan.Detail);
+                                }
+
+                                var newBonusSp = (long)character.BonusSp + skillPointBook.GrantedSp;
+                                var newBonusTp = (long)character.BonusTp + skillPointBook.GrantedTp;
+                                if (newBonusSp > int.MaxValue || newBonusTp > int.MaxValue)
+                                {
+                                    return Reject(
+                                        ExperienceItemUseStatus.LevelRestricted,
+                                        resolvedItemId,
+                                        "skill-point bonus exceeds the database limit");
+                                }
+
+                                Characters.CharacterStatComputer.DecodeGrowType(
+                                    character.GrowType,
+                                    out var skillFirstGrow,
+                                    out var skillSecondGrow);
+                                var syncedSkillBookState = SkillStateService.LoadAndSync(
+                                    _progressRepository,
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    character.Job,
+                                    character.Level,
+                                    (int)newBonusSp,
+                                    (int)newBonusTp,
+                                    persist: false,
+                                    growType: skillFirstGrow,
+                                    secondGrowType: skillSecondGrow);
+                                if (syncedSkillBookState.Points == null)
+                                {
+                                    return Reject(
+                                        ExperienceItemUseStatus.PersistenceFailed,
+                                        resolvedItemId,
+                                        "skill-point synchronization failed");
+                                }
+
+                                // 客户端技能点字段是 UInt16，先校验再消耗道具，避免溢出后丢书。
+                                var points = syncedSkillBookState.Points;
+                                if (points.TotalSp > ushort.MaxValue
+                                    || points.RemainingSp > ushort.MaxValue
+                                    || points.RemainingSpPage1 > ushort.MaxValue
+                                    || points.TotalTp > ushort.MaxValue
+                                    || points.RemainingTp > ushort.MaxValue
+                                    || points.RemainingTpPage1 > ushort.MaxValue)
+                                {
+                                    return Reject(
+                                        ExperienceItemUseStatus.LevelRestricted,
+                                        resolvedItemId,
+                                        "skill-point total exceeds the client protocol limit");
+                                }
+
+                                if (!InventoryDeleteService.TryConsumeFromSlot(
+                                        inventory,
+                                        listType,
+                                        slotIndex,
+                                        resolvedItemId,
+                                        1,
+                                        out var skillBookDelete)
+                                    || !skillBookDelete.Success
+                                    || skillBookDelete.DeletedCount != 1)
+                                {
+                                    return Reject(
+                                        ExperienceItemUseStatus.ConsumeFailed,
+                                        resolvedItemId,
+                                        "inventory deduction failed");
+                                }
+
+                                sourceConsumed = true;
+                                var consumedSkillBook = BuildConsumedMutation(
+                                    listType,
+                                    slotIndex,
+                                    sourceSnapshot,
+                                    skillBookDelete);
+
+                                // 技能点与背包扣除使用同一事务提交，任何一步失败都会恢复源道具。
+                                using (var update = connection.CreateCommand())
+                                {
+                                    update.Transaction = transaction;
+                                    update.CommandText = @"
+UPDATE characters
+SET bonus_sp=@newBonusSp,
+    bonus_tp=@newBonusTp,
+    updated_at=CURRENT_TIMESTAMP
+WHERE character_id=@cid
+  AND account_id=@aid
+  AND delete_flag=0
+  AND bonus_sp=@oldBonusSp
+  AND bonus_tp=@oldBonusTp;";
+                                    update.Parameters.AddWithValue("@newBonusSp", (int)newBonusSp);
+                                    update.Parameters.AddWithValue("@newBonusTp", (int)newBonusTp);
+                                    update.Parameters.AddWithValue("@cid", characterId);
+                                    update.Parameters.AddWithValue("@aid", accountId);
+                                    update.Parameters.AddWithValue("@oldBonusSp", character.BonusSp);
+                                    update.Parameters.AddWithValue("@oldBonusTp", character.BonusTp);
+                                    if (update.ExecuteNonQuery() != 1)
+                                    {
+                                        RestoreConsumedSource(
+                                            inventory,
+                                            listType,
+                                            slotIndex,
+                                            sourceSnapshot);
+                                        sourceConsumed = false;
+                                        return Reject(
+                                            ExperienceItemUseStatus.PersistenceFailed,
+                                            resolvedItemId,
+                                            "skill-point persistence was rejected by a concurrent update");
+                                    }
+                                }
+
+                                if (!InventoryPersistenceService.SaveDirtyInTransaction(
+                                        connection,
+                                        transaction,
+                                        lease))
+                                {
+                                    RestoreConsumedSource(
+                                        inventory,
+                                        listType,
+                                        slotIndex,
+                                        sourceSnapshot);
+                                    sourceConsumed = false;
+                                    return Reject(
+                                        ExperienceItemUseStatus.PersistenceFailed,
+                                        resolvedItemId,
+                                        "inventory persistence failed");
+                                }
+
+                                var skillBookGrowthExp = character.Level >= ExpTableProvider.MaxLevel
+                                    ? GrowthCapsuleProgressRepository.LoadTotalExp(
+                                        connection,
+                                        transaction,
+                                        accountId)
+                                    : 0;
+                                var skillBookResult = new ExperienceItemUseResult
+                                {
+                                    Status = ExperienceItemUseStatus.Success,
+                                    AccountId = accountId,
+                                    ItemTemplateId = resolvedItemId,
+                                    IsSkillPointBook = true,
+                                    ConsumedItem = consumedSkillBook,
+                                    PreviousLevel = character.Level,
+                                    NewLevel = character.Level,
+                                    PreviousExp = character.Exp,
+                                    NewExp = character.Exp,
+                                    GrantedSp = skillPointBook.GrantedSp,
+                                    GrantedTp = skillPointBook.GrantedTp,
+                                    TotalGrowthCapsuleExp = skillBookGrowthExp,
+                                    SyncedSkills = syncedSkillBookState.Skills,
+                                    SkillPoints = SkillStateService.GetProtocolState(
+                                        syncedSkillBookState.Skills,
+                                        syncedSkillBookState.Points),
+                                };
+
+                                transaction.Commit();
+                                inventory.ClearDirtyState();
+                                sourceConsumed = false;
+                                return skillBookResult;
                             }
 
                             var usePlan = ExperienceItemUsePolicy.Evaluate(
@@ -362,6 +542,60 @@ namespace DfoServer.Game.Inventory
                 ExpireTime = source != null ? source.ExpireTime : 0,
                 RequestedCount = 1,
                 AppliedCount = (short)(deleteResult != null ? deleteResult.DeletedCount : 0),
+            };
+        }
+
+        private static ExperienceItemUsePlan ValidateSkillPointBookUse(
+            SkillPointBookDefinition definition,
+            ItemCore source,
+            CharacterProgressSnapshot character,
+            uint nowUnixTime)
+        {
+            if (definition == null || !definition.IsSupported)
+            {
+                return new ExperienceItemUsePlan
+                {
+                    Status = ExperienceItemUseStatus.UnsupportedDefinition,
+                    Detail = definition?.UnsupportedReason
+                        ?? "skill-point book definition is unavailable",
+                };
+            }
+
+            if ((source != null
+                    && source.ExpireTime > 0
+                    && (uint)source.ExpireTime <= nowUnixTime)
+                || !definition.IsTemplateAvailableAt(nowUnixTime))
+            {
+                return new ExperienceItemUsePlan
+                {
+                    Status = ExperienceItemUseStatus.Expired,
+                    Detail = "item has expired",
+                };
+            }
+
+            if (definition.UsablePeriodDays > 0 && (source?.ExpireTime ?? 0) <= 0)
+            {
+                return new ExperienceItemUsePlan
+                {
+                    Status = ExperienceItemUseStatus.Expired,
+                    Detail = "timed item has no instance expiration",
+                };
+            }
+
+            if (character == null
+                || (definition.MinimumLevel >= 0 && character.Level < definition.MinimumLevel)
+                || (definition.MaximumLevel >= 0 && character.Level > definition.MaximumLevel))
+            {
+                return new ExperienceItemUsePlan
+                {
+                    Status = ExperienceItemUseStatus.LevelRestricted,
+                    Detail = $"level={character?.Level ?? 0} allowed={definition.MinimumLevel}..{definition.MaximumLevel}",
+                };
+            }
+
+            return new ExperienceItemUsePlan
+            {
+                Status = ExperienceItemUseStatus.Success,
             };
         }
 

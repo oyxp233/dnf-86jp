@@ -32,12 +32,15 @@ namespace DfoServer.Game.Inventory
         internal ExperienceItemUseStatus Status { get; set; }
         internal int AccountId { get; set; }
         internal int ItemTemplateId { get; set; }
+        internal bool IsSkillPointBook { get; set; }
         internal InventoryMutationResult ConsumedItem { get; set; }
         internal byte PreviousLevel { get; set; }
         internal byte NewLevel { get; set; }
         internal uint PreviousExp { get; set; }
         internal uint NewExp { get; set; }
         internal uint GrantedExp { get; set; }
+        internal int GrantedSp { get; set; }
+        internal int GrantedTp { get; set; }
         internal uint HonorExpGain { get; set; }
         internal ulong TotalHonorExp { get; set; }
         internal uint TotalGrowthCapsuleExp { get; set; }

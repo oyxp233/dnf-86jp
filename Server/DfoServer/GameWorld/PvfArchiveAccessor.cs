@@ -56,7 +56,10 @@ namespace DfoServer.GameWorld
             if (string.IsNullOrWhiteSpace(relativePath))
                 throw new ArgumentException("relativePath cannot be null or empty.", nameof(relativePath));
 
-            return relativePath.Replace('\\', '/').TrimStart('.', '/');
+            var normalized = relativePath.Replace('\\', '/').TrimStart('.', '/');
+            while (normalized.Contains("//", StringComparison.Ordinal))
+                normalized = normalized.Replace("//", "/");
+            return normalized;
         }
     }
 }

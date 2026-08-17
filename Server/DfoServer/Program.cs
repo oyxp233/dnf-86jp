@@ -34,6 +34,8 @@ namespace DfoServer
             ("--selftest-dungeon-map-fallback", SelfTests.DungeonMapFallbackSelfTest.Run),
             ("--selftest-move-map-request", SelfTests.MoveMapRequestSelfTest.Run),
             ("--selftest-tower-of-despair-progress", SelfTests.TowerOfDespairProgressSelfTest.Run),
+            ("--selftest-hell-party-selection", SelfTests.HellPartySelectionEligibilitySelfTest.Run),
+            ("--selftest-dungeon-entry-cost", SelfTests.DungeonEntryCostSelfTest.Run),
             ("--selftest-dungeon-room-progress", SelfTests.DungeonRoomProgressSelfTest.Run),
             ("--selftest-dungeon-run", SelfTests.DungeonRunLifecycleSelfTest.Run),
             ("--selftest-dungeon-instance-registry", SelfTests.DungeonInstanceRegistrySelfTest.Run),

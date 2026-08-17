@@ -15,6 +15,8 @@ namespace DfoServer.GameWorld
         public short X { get; set; }
 
         public short Y { get; set; }
+
+        public int WorldMapAreaId { get; set; }
     }
 
     public class Town
@@ -113,6 +115,7 @@ namespace DfoServer.GameWorld
                                 Area = checked((byte)areaId),
                                 X = x,
                                 Y = y,
+                                WorldMapAreaId = area.LinkedId,
                             };
                         }
                     }
@@ -127,6 +130,22 @@ namespace DfoServer.GameWorld
                 DungeonGateReturnCache[key] = resolved;
             roomInfo = resolved.GetValueOrDefault();
             return resolved.HasValue;
+        }
+
+        public static bool TryGetDungeonGateWorldMapAreaId(
+            int townId,
+            int areaId,
+            out int worldMapAreaId)
+        {
+            worldMapAreaId = -1;
+            if (!TryGetDungeonGateReturnInfo(townId, areaId, out var gate)
+                || gate.WorldMapAreaId < 0)
+            {
+                return false;
+            }
+
+            worldMapAreaId = gate.WorldMapAreaId;
+            return true;
         }
 
         internal static bool TryFindDungeonGateReturnPosition(

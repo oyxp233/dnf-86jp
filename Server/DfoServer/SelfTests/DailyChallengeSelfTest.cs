@@ -46,6 +46,38 @@ namespace DfoServer.SelfTests
             Check("normal active quest is not classified as daily challenge",
                 !QuestData.IsDailyChallengeQuest(NormalQuestId),
                 ref failures);
+            Check("challenge disjoint target comes from PVF check count",
+                QuestData.GetInitTrigger(14717) == 3,
+                ref failures);
+            Check("challenge quest-clear target comes from compact PVF int data",
+                QuestData.GetInitTrigger(14653) == 3,
+                ref failures);
+            Check("challenge use-skill target comes from compact PVF int data",
+                QuestData.GetInitTrigger(14681) == 6,
+                ref failures);
+            Check("challenge repeated-clear target comes from compact PVF int data",
+                QuestData.GetInitTrigger(14532) == 5,
+                ref failures);
+            Check("challenge clear condition threshold remains a one-clear target",
+                QuestData.GetInitTrigger(14694) == 1,
+                ref failures);
+            Check("PVF marks recommended-level clear challenge as server-owned",
+                QuestData.TryGetSuitableDungeonClearChallengeRule(
+                    14532,
+                    out var anyDifficulty)
+                && anyDifficulty == -1,
+                ref failures);
+            Check("PVF preserves adventure-or-higher recommended clear rule",
+                QuestData.TryGetSuitableDungeonClearChallengeRule(
+                    14548,
+                    out var adventureDifficulty)
+                && adventureDifficulty == 1,
+                ref failures);
+            Check("non-repeat clear condition is not a suitable-dungeon counter",
+                !QuestData.TryGetSuitableDungeonClearChallengeRule(
+                    14694,
+                    out _),
+                ref failures);
 
             var generated = new DailyChallengeService(connectionString)
                 .EnsureInitialized(BootstrapCharacterId);
@@ -63,6 +95,10 @@ namespace DfoServer.SelfTests
             Check("generated entries are challenge quests with initialized targets",
                 AllGeneratedEntriesValid(generated.Snapshot),
                 ref failures);
+            Check("level-61 special recommended-dungeon challenge starts at zero",
+                generated.Snapshot.DailyChallengeSpecialTarget == 5
+                && generated.Snapshot.DailyChallengeSpecialProgress == 0,
+                ref failures);
 
             var repeated = new DailyChallengeService(connectionString)
                 .EnsureInitialized(BootstrapCharacterId);
@@ -78,6 +114,8 @@ namespace DfoServer.SelfTests
                 rolled.Refreshed
                 && AllGeneratedEntriesValid(rolled.Snapshot)
                 && rolled.Snapshot.DailyChallengeRewardClaimFlags[4] == 0
+                && rolled.Snapshot.DailyChallengeSpecialTarget == 5
+                && rolled.Snapshot.DailyChallengeSpecialProgress == 0
                 && !AnyEntryClaimed(connectionString, BootstrapCharacterId)
                 && !HasChallengeClearedFlag(
                     connectionString,
@@ -87,6 +125,8 @@ namespace DfoServer.SelfTests
             var selectInit = new Game.SelectCharacter.SelectCharacterInitializationSnapshot
             {
                 DailyChallengeCharacterLevel = 7,
+                DailyChallengeSpecialTarget = 5,
+                DailyChallengeSpecialProgress = 2,
             };
             var initialGroup = new Game.SelectCharacter.RacingDungeonGroupSnapshot
             {
@@ -106,11 +146,21 @@ namespace DfoServer.SelfTests
                 CharacterRecord = new Game.Characters.CharacterRecord { Level = 86 },
             };
             new DailyChallengeBodyBuilder().TryBuild(selectSnapshot, 0, out var selectBody);
-            Check("selection 0x0286 uses the current character level instead of the legacy seed",
+            Check("selection 0x0286 projects character level for special challenge lookup",
                 BitConverter.ToUInt32(selectBody, 0) == 86,
                 ref failures);
             Check("initial 0x0286 entry uses remaining,target wire order (3,3)",
-                IsExpectedSnapshot(selectBody, remaining: 3),
+                IsExpectedSnapshot(
+                    selectBody,
+                    characterLevel: 86,
+                    remaining: 3,
+                    expectedTailIds: new uint[] { 777, 1 }),
+                ref failures);
+            Check("0x0287 carries one opaque special completion token",
+                BitConverter.ToString(
+                    DailyChallengeClearDungeonBodyBuilder.Build(
+                        2))
+                    == "02-00-00-00",
                 ref failures);
 
             var firstSender = new RecordingSender();
@@ -133,7 +183,10 @@ namespace DfoServer.SelfTests
                 firstSender.LastAckBody == null,
                 ref failures);
             Check("in-progress 0x0286 entry uses remaining,target wire order (2,3)",
-                IsExpectedSnapshot(firstSender.LastNotiBody, remaining: 2),
+                IsExpectedSnapshot(
+                    firstSender.LastNotiBody,
+                    characterLevel: 86,
+                    remaining: 2),
                 ref failures);
 
             var rebuiltSender = new RecordingSender();
@@ -177,7 +230,10 @@ namespace DfoServer.SelfTests
                 && rebuiltSender.LastAckBody == null
                 && rebuiltSender.Calls.Count == 1
                 && rebuiltSender.Calls[0] == "NOTI:0286"
-                && IsExpectedSnapshot(rebuiltSender.LastNotiBody, remaining: 0),
+                && IsExpectedSnapshot(
+                    rebuiltSender.LastNotiBody,
+                    characterLevel: 86,
+                    remaining: 0),
                 ref failures);
 
             var resetService = new DailyChallengeService(connectionString);
@@ -205,7 +261,10 @@ namespace DfoServer.SelfTests
                 && rebuiltSender.LastAckBody == null
                 && rebuiltSender.Calls.Count == 1
                 && rebuiltSender.Calls[0] == "NOTI:0286"
-                && IsExpectedSnapshot(rebuiltSender.LastNotiBody, remaining: 3),
+                && IsExpectedSnapshot(
+                    rebuiltSender.LastNotiBody,
+                    characterLevel: 86,
+                    remaining: 3),
                 ref failures);
 
             SaveNormalActiveQuest(connectionString);
@@ -223,6 +282,187 @@ namespace DfoServer.SelfTests
             Check("normal quest does not emit a daily challenge snapshot",
                 rebuiltSender.Calls.Count == 1
                 && rebuiltSender.Calls[0] == "ACK:0021",
+                ref failures);
+
+            SeedSuitableDungeonChallenges(connectionString);
+            var suitableClearEvent = Guid.NewGuid();
+            var suitableClear = new DailyChallengeService(connectionString)
+                .ApplySuitableDungeonClear(
+                    CharacterId,
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    suitableClearEvent);
+            Check("authoritative suitable clear advances all matching PVF rules",
+                suitableClear.RelevantEntries == 2
+                && suitableClear.ChangedEntries == 2
+                && suitableClear.SpecialRelevant
+                && suitableClear.SpecialChanged
+                && suitableClear.Snapshot.DailyChallengeSpecialProgress == 1
+                && ReadUInt32(connectionString,
+                    "SELECT value_b FROM character_daily_challenge_entries "
+                    + "WHERE character_id=@cid AND track_like_id=@id;",
+                    14532) == 4
+                && ReadUInt32(connectionString,
+                    "SELECT value_b FROM character_daily_challenge_entries "
+                    + "WHERE character_id=@cid AND track_like_id=@id;",
+                    14548) == 2,
+                ref failures);
+            var relogSnapshot =
+                new Game.SelectCharacter.SelectCharacterInitializationSnapshot();
+            new Game.CharacterData.SqliteCharacterStateRepository(
+                    databasePath,
+                    ServerPaths.SchemaFilePath)
+                .LoadFlags(CharacterId, relogSnapshot);
+            Check("relogin loader preserves persisted special challenge progress",
+                relogSnapshot.DailyChallengeSpecialTarget == 5
+                && relogSnapshot.DailyChallengeSpecialProgress == 1,
+                ref failures);
+            var replayedSuitableClear = new DailyChallengeService(connectionString)
+                .ApplySuitableDungeonClear(
+                    CharacterId,
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    suitableClearEvent);
+            Check("same authoritative clear event is idempotent",
+                replayedSuitableClear.RelevantEntries == 2
+                && replayedSuitableClear.ChangedEntries == 0
+                && replayedSuitableClear.SpecialRelevant
+                && !replayedSuitableClear.SpecialChanged
+                && replayedSuitableClear.Snapshot.DailyChallengeSpecialProgress == 1
+                && ReadUInt32(connectionString,
+                    "SELECT value_b FROM character_daily_challenge_entries "
+                    + "WHERE character_id=@cid AND track_like_id=@id;",
+                    14532) == 4,
+                ref failures);
+
+            SeedSuitableDungeonChallenges(connectionString);
+            rebuiltSender.Reset();
+            var projectedClearEvent = Guid.NewGuid();
+            rebuiltManager.SyncSuitableDungeonDailyChallengeAsync(
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    projectedClearEvent)
+                .GetAwaiter()
+                .GetResult();
+            rebuiltSender.NotiBodies.TryGetValue(
+                0x0286,
+                out var suitableSnapshotBody);
+            var projectedTailIds = suitableSnapshotBody == null
+                ? new List<uint>()
+                : ReadTailIds(suitableSnapshotBody);
+            Check("combined clear snapshots ordinary progress before its special token",
+                rebuiltSender.Calls.Count == 2
+                && rebuiltSender.Calls[0] == "NOTI:0286"
+                && rebuiltSender.Calls[1] == "NOTI:0287"
+                && rebuiltSender.NotiBodies.TryGetValue(
+                    0x0287,
+                    out var clearDungeonBody)
+                && projectedTailIds.Count == 1
+                && BitConverter.ToUInt32(clearDungeonBody, 0)
+                    == projectedTailIds[0],
+                ref failures);
+            rebuiltSender.Reset();
+            rebuiltManager.SyncSuitableDungeonDailyChallengeAsync(
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    projectedClearEvent)
+                .GetAwaiter()
+                .GetResult();
+            Check("idempotent settlement replay does not emit 0x0287 twice",
+                rebuiltSender.Calls.Count == 1
+                && rebuiltSender.Calls[0] == "NOTI:0286"
+                && !rebuiltSender.NotiBodies.ContainsKey(0x0287),
+                ref failures);
+
+            rebuiltSender.Reset();
+            rebuiltManager.HandleSetTriggerAsync(
+                    0x0021,
+                    BuildWireSetTriggerBody(14532, increment: false),
+                    triggerSessionId)
+                .GetAwaiter()
+                .GetResult();
+            Check("client suitable-clear echo cannot double-count server progress",
+                ReadUInt32(connectionString,
+                    "SELECT value_b FROM character_daily_challenge_entries "
+                    + "WHERE character_id=@cid AND track_like_id=@id;",
+                    14532) == 4
+                && rebuiltSender.Calls.Count == 1
+                && rebuiltSender.Calls[0] == "NOTI:0286",
+                ref failures);
+
+            SeedOrdinaryOnlySuitableDungeonChallenge(connectionString);
+            rebuiltSender.Reset();
+            rebuiltManager.SyncSuitableDungeonDailyChallengeAsync(
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    Guid.NewGuid())
+                .GetAwaiter()
+                .GetResult();
+            Check("ordinary-only suitable clear emits only its committed snapshot",
+                rebuiltSender.Calls.Count == 1
+                && rebuiltSender.Calls[0] == "NOTI:0286"
+                && !rebuiltSender.NotiBodies.ContainsKey(0x0287)
+                && ReadUInt32(connectionString,
+                    "SELECT value_b FROM character_daily_challenge_entries "
+                    + "WHERE character_id=@cid AND track_like_id=@id;",
+                    14532) == 4,
+                ref failures);
+
+            SeedSpecialOnlySuitableDungeonChallenge(connectionString);
+            rebuiltSender.Reset();
+            rebuiltManager.SyncSuitableDungeonDailyChallengeAsync(
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    Guid.NewGuid())
+                .GetAwaiter()
+                .GetResult();
+            var firstSpecialToken = rebuiltSender.NotiBodies.TryGetValue(
+                    0x0287,
+                    out var firstSpecialBody)
+                ? BitConverter.ToUInt32(firstSpecialBody, 0)
+                : 0;
+            Check("special-only clear emits one 0x0287 without a resetting snapshot",
+                rebuiltSender.Calls.Count == 1
+                && rebuiltSender.Calls[0] == "NOTI:0287"
+                && firstSpecialToken != 0
+                && !rebuiltSender.NotiBodies.ContainsKey(0x0286),
+                ref failures);
+
+            rebuiltSender.Reset();
+            rebuiltManager.SyncSuitableDungeonDailyChallengeAsync(
+                    dungeonId: 84,
+                    difficulty: 2,
+                    characterLevel: 62,
+                    Guid.NewGuid())
+                .GetAwaiter()
+                .GetResult();
+            var secondSpecialToken = rebuiltSender.NotiBodies.TryGetValue(
+                    0x0287,
+                    out var secondSpecialBody)
+                ? BitConverter.ToUInt32(secondSpecialBody, 0)
+                : 0;
+            var repeatedClearSnapshot =
+                new Game.SelectCharacter.SelectCharacterInitializationSnapshot();
+            new Game.CharacterData.SqliteCharacterStateRepository(
+                    databasePath,
+                    ServerPaths.SchemaFilePath)
+                .LoadFlags(CharacterId, repeatedClearSnapshot);
+            var repeatedClearTailIds = ReadTailIds(
+                DailyChallengeBodyBuilder.Build(repeatedClearSnapshot));
+            Check("repeating the same suitable dungeon adds a distinct durable token",
+                rebuiltSender.Calls.Count == 1
+                && rebuiltSender.Calls[0] == "NOTI:0287"
+                && secondSpecialToken != 0
+                && secondSpecialToken != firstSpecialToken
+                && repeatedClearSnapshot.DailyChallengeSpecialProgress == 2
+                && repeatedClearTailIds.Count == 2
+                && repeatedClearTailIds[0] != repeatedClearTailIds[1],
                 ref failures);
 
             Check("PVF group index 4 resolves the configured level-86 reward",
@@ -332,6 +572,17 @@ namespace DfoServer.SelfTests
                     && BitConverter.ToUInt16(
                         rebuiltSender.LastAckBody,
                         1) == RewardChallengeQuestId,
+                    ref failures);
+                Check("challenge entry claim refreshes the durable clear-list projection",
+                    rebuiltSender.Calls.IndexOf("ACK:0022") >= 0
+                    && rebuiltSender.Calls.IndexOf("NOTI:0164")
+                        > rebuiltSender.Calls.IndexOf("ACK:0022")
+                    && rebuiltSender.NotiBodies.TryGetValue(
+                        0x0164,
+                        out var clearListBody)
+                    && clearListBody.Length
+                        == 4 + ClearQuestListBodyBuilder.PayloadLength
+                    && clearListBody[4 + RewardChallengeQuestId] == 1,
                     ref failures);
 
                 rebuiltSender.Reset();
@@ -491,6 +742,12 @@ namespace DfoServer.SelfTests
 UPDATE character_daily_challenge_entries
 SET value_b = 0
 WHERE character_id = @cid;
+UPDATE character_daily_challenge_special_state
+SET progress_value = 3
+WHERE character_id = @cid;
+INSERT OR IGNORE INTO character_daily_challenge_special_progress_events
+    (character_id, source_event_id)
+VALUES (@cid, 'daily-rollover-selftest');
 INSERT OR IGNORE INTO character_daily_challenge_entry_claims
     (character_id, group_index, entry_index, quest_id)
 SELECT character_id, group_index, entry_index, track_like_id
@@ -517,21 +774,64 @@ WHERE character_id = @cid;";
             }
         }
 
-        private static bool IsExpectedSnapshot(byte[] body, uint remaining)
+        private static bool IsExpectedSnapshot(
+            byte[] body,
+            uint characterLevel,
+            uint remaining,
+            IReadOnlyList<uint> expectedTailIds = null)
         {
-            if (body == null || body.Length != 46)
+            expectedTailIds ??= new uint[] { 777 };
+            if (body == null || body.Length != 42 + expectedTailIds.Count * 4)
                 return false;
 
-            return BitConverter.ToUInt32(body, 0) == 86
-                && BitConverter.ToUInt32(body, 4) == 1
-                && BitConverter.ToUInt32(body, 8) == 5
-                && BitConverter.ToUInt32(body, 12) == 1
-                && BitConverter.ToUInt32(body, 16) == ChallengeQuestId
-                && BitConverter.ToUInt32(body, 20) == remaining
-                && BitConverter.ToUInt32(body, 24) == 3
-                && BitConverter.ToUInt32(body, 28) == 6
-                && BitConverter.ToUInt32(body, 38) == 1
-                && BitConverter.ToUInt32(body, 42) == 777;
+            if (BitConverter.ToUInt32(body, 0) != characterLevel
+                || BitConverter.ToUInt32(body, 4) != 1
+                || BitConverter.ToUInt32(body, 8) != 5
+                || BitConverter.ToUInt32(body, 12) != 1
+                || BitConverter.ToUInt32(body, 16) != ChallengeQuestId
+                || BitConverter.ToUInt32(body, 20) != remaining
+                || BitConverter.ToUInt32(body, 24) != 3
+                || BitConverter.ToUInt32(body, 28) != 6
+                || BitConverter.ToUInt32(body, 38) != expectedTailIds.Count)
+            {
+                return false;
+            }
+
+            for (var index = 0; index < expectedTailIds.Count; index++)
+            {
+                if (BitConverter.ToUInt32(body, 42 + index * 4)
+                    != expectedTailIds[index])
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static List<uint> ReadTailIds(byte[] body)
+        {
+            var offset = 4;
+            var groupCount = checked((int)BitConverter.ToUInt32(body, offset));
+            offset += 4;
+            for (var group = 0; group < groupCount; group++)
+            {
+                offset += 4;
+                var entryCount = checked((int)BitConverter.ToUInt32(body, offset));
+                offset += 4 + entryCount * 12;
+            }
+
+            var flagCount = checked((int)BitConverter.ToUInt32(body, offset));
+            offset += 4 + flagCount;
+            var tailCount = checked((int)BitConverter.ToUInt32(body, offset));
+            offset += 4;
+            var result = new List<uint>(tailCount);
+            for (var index = 0; index < tailCount; index++)
+            {
+                result.Add(BitConverter.ToUInt32(body, offset));
+                offset += 4;
+            }
+            return result;
         }
 
         private static uint SnapshotValue(Game.SelectCharacter.SelectCharacterInitializationSnapshot snapshot)
@@ -651,6 +951,103 @@ VALUES (@cid, 0, 0, @questId, 1, 0);";
                     command.Parameters.AddWithValue(
                         "@questId",
                         RewardChallengeQuestId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static void SeedSuitableDungeonChallenges(
+            string connectionString)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+DELETE FROM character_daily_challenge_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_state
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_entry_claims
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_entries
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_groups
+WHERE character_id = @cid;
+INSERT INTO character_daily_challenge_groups
+    (character_id, group_index, group_id)
+VALUES (@cid, 0, 0);
+INSERT INTO character_daily_challenge_entries
+    (character_id, group_index, entry_index, track_like_id, value_a, value_b)
+VALUES (@cid, 0, 0, 14532, 5, 5),
+       (@cid, 0, 1, 14548, 3, 3);";
+                    command.CommandText += @"
+INSERT INTO character_daily_challenge_special_state
+    (character_id, challenge_type, target_value, progress_value)
+VALUES (@cid, 12, 5, 0);";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static void SeedOrdinaryOnlySuitableDungeonChallenge(
+            string connectionString)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+DELETE FROM character_daily_challenge_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_state
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_entries
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_groups
+WHERE character_id = @cid;
+INSERT INTO character_daily_challenge_groups
+    (character_id, group_index, group_id)
+VALUES (@cid, 0, 0);
+INSERT INTO character_daily_challenge_entries
+    (character_id, group_index, entry_index, track_like_id, value_a, value_b)
+VALUES (@cid, 0, 0, 14532, 5, 5);";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static void SeedSpecialOnlySuitableDungeonChallenge(
+            string connectionString)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+DELETE FROM character_daily_challenge_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_progress_events
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_special_state
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_entries
+WHERE character_id = @cid;
+DELETE FROM character_daily_challenge_groups
+WHERE character_id = @cid;
+INSERT INTO character_daily_challenge_special_state
+    (character_id, challenge_type, target_value, progress_value)
+VALUES (@cid, 12, 5, 0);";
+                    command.Parameters.AddWithValue("@cid", CharacterId);
                     command.ExecuteNonQuery();
                 }
             }
@@ -889,6 +1286,8 @@ VALUES (@cid, 0, 777);";
         private sealed class RecordingSender : ISessionPacketSender
         {
             internal List<string> Calls { get; } = new List<string>();
+            internal Dictionary<ushort, byte[]> NotiBodies { get; } =
+                new Dictionary<ushort, byte[]>();
             internal byte[] LastAckBody { get; private set; }
             internal byte[] LastNotiBody { get; private set; }
 
@@ -907,6 +1306,7 @@ VALUES (@cid, 0, 777);";
             {
                 Calls.Add($"NOTI:{notiType:X4}");
                 LastNotiBody = body;
+                NotiBodies[notiType] = body;
                 return Task.CompletedTask;
             }
 
@@ -920,6 +1320,7 @@ VALUES (@cid, 0, 777);";
             internal void Reset()
             {
                 Calls.Clear();
+                NotiBodies.Clear();
                 LastAckBody = null;
                 LastNotiBody = null;
             }

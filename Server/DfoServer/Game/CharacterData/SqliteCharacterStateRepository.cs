@@ -188,6 +188,22 @@ namespace DfoServer.Game.CharacterData
                     }
                 }
 
+                using (var cmd = new SqliteCommand(
+                    "SELECT target_value, progress_value FROM character_daily_challenge_special_state WHERE character_id = @cid", conn))
+                {
+                    cmd.Parameters.AddWithValue("@cid", characterId);
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        if (reader.Read())
+                        {
+                            snapshot.DailyChallengeSpecialTarget =
+                                (uint)reader.GetInt64(0);
+                            snapshot.DailyChallengeSpecialProgress =
+                                (uint)reader.GetInt64(1);
+                        }
+                    }
+                }
+
                 snapshot.RacingDungeonTailIds.Clear();
                 using (var cmd = new SqliteCommand(
                     "SELECT id_value FROM character_daily_challenge_tail_ids WHERE character_id = @cid ORDER BY sort_order", conn))

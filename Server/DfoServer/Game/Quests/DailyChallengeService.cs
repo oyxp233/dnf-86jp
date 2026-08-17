@@ -91,10 +91,20 @@ WHERE character_id = @cid;";
 
             var triggerType = body[2];
             var isIncrement = body.Length >= 4 && body[3] != 0;
+            var serverOwnedSuitableClear = QuestData
+                .TryGetSuitableDungeonClearChallengeRule(
+                    questId,
+                    out _);
             var stored = _repository.ApplyMutation(
                 characterId,
                 questId,
-                (target, current) => ApplyMutation(target, current, triggerType, isIncrement));
+                (target, current) => serverOwnedSuitableClear
+                    ? current
+                    : ApplyMutation(
+                        target,
+                        current,
+                        triggerType,
+                        isIncrement));
 
             if (!stored.Found)
             {
@@ -115,6 +125,13 @@ WHERE character_id = @cid;";
                     + $"remaining={stored.PreviousValue}->{stored.CurrentValue} "
                     + $"target={stored.TargetValue}");
             }
+            else if (serverOwnedSuitableClear && stored.Found)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] SET_TRIGGER echo server-owned suitable clear "
+                    + $"cid={characterId} quest={questId} "
+                    + $"remaining={stored.CurrentValue} target={stored.TargetValue}");
+            }
 
             result = new DailyChallengeSetTriggerResult(
                 new QuestSetTriggerResult
@@ -127,6 +144,32 @@ WHERE character_id = @cid;";
                 stored.Found,
                 stored.Changed);
             return true;
+        }
+
+        internal DailyChallengeDungeonClearResult ApplySuitableDungeonClear(
+            int characterId,
+            int dungeonId,
+            int difficulty,
+            int characterLevel,
+            Guid sourceEventId)
+        {
+            var result = _repository.ApplySuitableDungeonClear(
+                characterId,
+                dungeonId,
+                difficulty,
+                characterLevel,
+                sourceEventId);
+            if (result.ChangedEntries > 0 || result.SpecialChanged)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] SUITABLE_DUNGEON_CLEAR cid={characterId} "
+                    + $"dungeon={dungeonId} difficulty={difficulty} "
+                    + $"level={characterLevel} event={sourceEventId:N} "
+                    + $"changed={result.ChangedEntries} "
+                    + $"specialChanged={result.SpecialChanged} "
+                    + $"specialProgress={result.Snapshot.DailyChallengeSpecialProgress}");
+            }
+            return result;
         }
 
         internal DailyChallengeResetResult ResetCharacter(int characterId)

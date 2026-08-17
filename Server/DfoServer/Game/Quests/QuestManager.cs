@@ -24,6 +24,8 @@ namespace DfoServer.Game.Quests
         private readonly string _connStr;
         private readonly QuestService _service;
         private readonly DailyChallengeService _dailyChallengeService;
+        private readonly DailyChallengeRewardApplicationService
+            _dailyChallengeRewards;
         private readonly ImageCommunicationApplicationService
             _imageCommunicationService;
         private readonly QuestNotifySelectionService _notifySelectionService;
@@ -57,6 +59,8 @@ namespace DfoServer.Game.Quests
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _service = new QuestService(connStr);
             _dailyChallengeService = new DailyChallengeService(connStr);
+            _dailyChallengeRewards =
+                new DailyChallengeRewardApplicationService(connStr);
             _imageCommunicationService =
                 new ImageCommunicationApplicationService(connStr);
             _notifySelectionService = new QuestNotifySelectionService(connStr);
@@ -329,11 +333,15 @@ namespace DfoServer.Game.Quests
                     null);
             }
 
-            return _dailyChallengeService.ClaimReward(
+            var owner = new QuestCommandOwnerContext(
                 characterId,
-                _sender.Player?.Level ?? 0,
-                groupIndex,
+                _sender.AccountId,
+                sessionId,
                 lease);
+            return _dailyChallengeRewards.Claim(
+                owner,
+                _sender.Player?.Level ?? 0,
+                groupIndex);
         }
 
         public async Task HandleFinishQuestAsync(

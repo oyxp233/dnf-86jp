@@ -683,6 +683,13 @@ CREATE TABLE IF NOT EXISTS character_daily_challenge_entry_claims (
 );")),
 
             (54, "project claimed challenge entries into client clear flags", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_invisible_falgs (
+    character_id INTEGER NOT NULL,
+    slot_index INTEGER NOT NULL,
+    flag_value INTEGER NOT NULL,
+    PRIMARY KEY (character_id, slot_index),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
 INSERT INTO character_invisible_falgs (character_id, slot_index, flag_value)
 SELECT character_id, quest_id, 1
 FROM character_daily_challenge_entry_claims
@@ -726,6 +733,9 @@ CREATE TABLE IF NOT EXISTS character_daily_challenge_special_progress_events (
 CREATE INDEX IF NOT EXISTS idx_daily_challenge_special_events_character
     ON character_daily_challenge_special_progress_events(character_id, created_at);")),
         };
+
+        internal static int LatestVersion =>
+            Steps.Length == 0 ? 0 : Steps[Steps.Length - 1].Version;
 
         private static void MigrateEnchanterEndurance(SqliteConnection connection)
         {

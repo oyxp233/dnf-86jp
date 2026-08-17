@@ -135,6 +135,27 @@ namespace DfoServer.SelfTests
                     && body.Length >= 16
                     && BitConverter.ToUInt16(body, 14) == 8,
                 ref failures);
+
+            var blockedBody = Network.Builders.EnterSelectDungeonStateBuilder
+                .BuildEnterSelectDungeon(
+                    new[] { player.UserId },
+                    8,
+                    new ushort[] { 0 });
+            Check("enter-select-dungeon writes the blocked hell-party count",
+                blockedBody != null
+                    && blockedBody.Length == 21
+                    && blockedBody[4] == 1,
+                ref failures);
+            Check("enter-select-dungeon writes the blocked party slot before the roster",
+                blockedBody != null
+                    && BitConverter.ToUInt16(blockedBody, 5) == 0
+                    && blockedBody[8] == 1
+                    && BitConverter.ToUInt16(blockedBody, 9) == player.UserId,
+                ref failures);
+            Check("variable hell-party block list keeps later fields aligned",
+                blockedBody != null
+                    && BitConverter.ToUInt16(blockedBody, 16) == 8,
+                ref failures);
         }
 
         private static void DropTowerProgressTable(string connectionString)

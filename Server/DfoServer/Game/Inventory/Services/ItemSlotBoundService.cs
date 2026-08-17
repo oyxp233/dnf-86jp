@@ -73,7 +73,7 @@ namespace DfoServer.Game.Inventory
                     return true;
                 case ItemCore.KindAvatar:
                     listType = InventoryListType.Avatar;
-                    range = GetAvatarOpenRange(0);
+                    range = GetAvatarPhysicalRange();
                     return true;
                 case ItemCore.KindCreature:
                     listType = InventoryListType.Pet;
@@ -120,7 +120,7 @@ namespace DfoServer.Game.Inventory
                     return TryGetMainItemKindBySlot(slotIndex, mainExpandStageKey, out itemKind);
                 case InventoryListType.Avatar:
                     itemKind = ItemCore.KindAvatar;
-                    return GetAvatarOpenRange(0).Contains(slotIndex);
+                    return GetAvatarPhysicalRange().Contains(slotIndex);
                 case InventoryListType.Equipment:
                     return TryGetBodyItemKindBySlot(slotIndex, out itemKind);
                 case InventoryListType.Pet:
@@ -164,7 +164,7 @@ namespace DfoServer.Game.Inventory
                     range = new ItemSlotRange(3, 351);
                     return true;
                 case InventoryListType.Avatar:
-                    range = GetAvatarOpenRange(0);
+                    range = GetAvatarPhysicalRange();
                     return true;
                 case InventoryListType.Equipment:
                     range = new ItemSlotRange(0, 29);
@@ -186,7 +186,13 @@ namespace DfoServer.Game.Inventory
 
         internal static ItemSlotRange GetAvatarOpenRange(int avatarListParam16)
         {
-            return new ItemSlotRange(0, 209);
+            var capacity = AvatarInventoryExpansionRule.GetOpenCapacity(avatarListParam16);
+            return CreateOpenRange(InventoryService.AvatarSlotStart, capacity);
+        }
+
+        private static ItemSlotRange GetAvatarPhysicalRange()
+        {
+            return new ItemSlotRange(InventoryService.AvatarSlotStart, InventoryService.AvatarSlotEnd);
         }
 
         internal static ItemSlotRange GetPersonalCargoOpenRange(int personalCargoListParam16)

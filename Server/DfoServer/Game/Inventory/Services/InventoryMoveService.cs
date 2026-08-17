@@ -586,6 +586,11 @@ namespace DfoServer.Game.Inventory
                     actor.GrowType))
                 return Fail(result, InventoryMoveServiceError.InvalidDestinationSlot);
 
+            if (targetListType == InventoryListType.Avatar
+                && !ItemSlotBoundService.GetAvatarOpenRange(
+                    inventory.GetListParam16(InventoryListType.Avatar)).Contains(targetSlotIndex))
+                return Fail(result, InventoryMoveServiceError.InvalidDestinationSlot);
+
             if (!ItemSlotBoundService.IsValidSlotForKind(
                     item.ItemKind,
                     targetListType,

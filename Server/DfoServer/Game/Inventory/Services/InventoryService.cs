@@ -661,6 +661,8 @@ namespace DfoServer.Game.Inventory
                     return CargoModel.NormalizeCapacity(value);
                 case InventoryListType.AccountCargo:
                     return AccountCargoModel.NormalizeSelectionKey(value);
+                case InventoryListType.Avatar:
+                    return AvatarInventoryExpansionRule.NormalizeExpansion(value);
                 default:
                     return value;
             }

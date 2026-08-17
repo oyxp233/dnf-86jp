@@ -89,6 +89,10 @@ namespace DfoServer.Game.Inventory
                     out var range))
                 return Fail(plan, InventoryInsertError.InvalidTargetList);
 
+            if (listType == InventoryListType.Avatar)
+                range = ItemSlotBoundService.GetAvatarOpenRange(
+                    inventory.GetListParam16(InventoryListType.Avatar));
+
             var insertCount = InventoryStackRuleService.NormalizeInsertCount(item, count);
             if (listType == InventoryListType.Main && InventoryStackRuleService.IsStackable(item))
             {
@@ -397,6 +401,11 @@ namespace DfoServer.Game.Inventory
             if (targetListType == InventoryListType.AccountCargo)
                 return inventory.AccountCargo.IsOpenSlot(slotIndex);
 
+            if (targetListType == InventoryListType.Avatar
+                && !ItemSlotBoundService.GetAvatarOpenRange(
+                    inventory.GetListParam16(InventoryListType.Avatar)).Contains(slotIndex))
+                return false;
+
             if (targetListType == InventoryListType.Main
                 && slotIndex >= QuickSlotRange.Start
                 && slotIndex <= QuickSlotRange.End)
@@ -646,6 +655,11 @@ namespace DfoServer.Game.Inventory
             if (targetListType == InventoryListType.AccountCargo && !inventory.AccountCargo.IsOpenSlot(targetSlotIndex))
                 return Fail(plan, InventoryInsertError.InvalidTargetSlot);
 
+            if (targetListType == InventoryListType.Avatar
+                && !ItemSlotBoundService.GetAvatarOpenRange(
+                    inventory.GetListParam16(InventoryListType.Avatar)).Contains(targetSlotIndex))
+                return Fail(plan, InventoryInsertError.InvalidTargetSlot);
+
             if (targetListType == InventoryListType.PersonalCargo
                 || targetListType == InventoryListType.AccountCargo)
                 return true;
@@ -691,6 +705,11 @@ namespace DfoServer.Game.Inventory
                 return Fail(result, InventoryInsertError.InvalidTargetSlot);
 
             if (targetListType == InventoryListType.AccountCargo && !inventory.AccountCargo.IsOpenSlot(targetSlotIndex))
+                return Fail(result, InventoryInsertError.InvalidTargetSlot);
+
+            if (targetListType == InventoryListType.Avatar
+                && !ItemSlotBoundService.GetAvatarOpenRange(
+                    inventory.GetListParam16(InventoryListType.Avatar)).Contains(targetSlotIndex))
                 return Fail(result, InventoryInsertError.InvalidTargetSlot);
 
             if (targetListType == InventoryListType.PersonalCargo

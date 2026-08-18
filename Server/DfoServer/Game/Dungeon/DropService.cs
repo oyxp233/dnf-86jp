@@ -232,7 +232,8 @@ namespace DfoServer.Game.Dungeon
                     Success = true,
                     IsGold = false,
                     InventorySlot = grant.SlotIndex,
-                    PickedUpItemId = pickedItemId
+                    PickedUpItemId = pickedItemId,
+                    IsAmplify = grant.Core != null && grant.Core.AmplifyType != 0,
                 };
             }
         }
@@ -538,6 +539,7 @@ namespace DfoServer.Game.Dungeon
         public int ExtraGold;
         public short InventorySlot;
         public int PickedUpItemId;
+        public bool IsAmplify;
         public PickupFailReason FailReason;
 
         internal static readonly PickupResult NotFound = new PickupResult { FailReason = PickupFailReason.NotFound };

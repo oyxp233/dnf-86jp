@@ -66,6 +66,9 @@ namespace DfoServer.Game.Quests
         public uint GrowthCapsuleExp;
         public uint TotalGrowthCapsuleExp;
         public uint Gold;
+        // FINISH_QUEST ACK 的第二个 u32 是本次完成次数，不是金币。
+        // 金币由后续 itemId=0 的 InsertedEntries 记录投影给客户端。
+        public uint CompletionCount;
         // 经验结算后的等级与总经验(与奖励同一事务已落库; Exp 为 0 时等于结算前取值)。
         public byte NewLevel;
         public uint NewExp;

@@ -30,6 +30,7 @@ namespace DfoServer.Game.SelectCharacter
         private readonly AccountSettingsRepository _accountSettingsRepository;
         private readonly CharacterTitleBookRepository _titleBookRepository;
         private readonly DailyReset.DailyResetService _dailyResetService;
+        private readonly Quests.DailyChallengeService _dailyChallengeService;
         private readonly LotteryDoubleRewardPolicy _lotteryDoubleRewardPolicy;
         private readonly TitleBookMutationService _titleBookMutationService;
         private readonly HonorLevelSyncService _honorLevel;
@@ -54,6 +55,9 @@ namespace DfoServer.Game.SelectCharacter
             _connectionString = Infrastructure.SqliteDatabaseBootstrap.Initialize(databasePath, schemaFilePath);
             _rentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
             _dailyResetService = dailyResetService ?? new DailyReset.DailyResetService(databasePath, schemaFilePath);
+            _dailyChallengeService = new Quests.DailyChallengeService(
+                _connectionString,
+                _dailyResetService);
             _lotteryDoubleRewardPolicy = new LotteryDoubleRewardPolicy(
                 _dailyResetService,
                 _connectionString);
@@ -187,6 +191,16 @@ namespace DfoServer.Game.SelectCharacter
             SanitizeDarkKnightComboSkillInfo(initSnapshot);
             initSnapshot.CreatureItemList = LoadCreatureItemListSnapshot(characterId);
 
+            try
+            {
+                _dailyChallengeService.EnsureInitialized(characterId);
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[SelectCharacterDataSource] daily challenge initialization failed "
+                    + $"cid={characterId}: {ex.Message}");
+            }
             _initFlagsRepository.LoadAll(characterId, initSnapshot);
             var loginPermissions = _dungeonDifficultyPermissions
                 .BuildLoginPermissions(

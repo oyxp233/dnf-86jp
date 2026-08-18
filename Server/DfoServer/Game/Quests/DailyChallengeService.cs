@@ -1,9 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.Collections.Concurrent;
-using DfoServer.Game.Inventory;
+using DfoServer.Game.DailyReset;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.GameWorld;
+using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.Quests
@@ -16,10 +16,62 @@ namespace DfoServer.Game.Quests
         private readonly DailyChallengeRepository _repository;
         private readonly string _connectionString;
 
-        internal DailyChallengeService(string connectionString)
+        internal DailyChallengeService(
+            string connectionString,
+            DailyResetService dailyReset = null)
         {
             _connectionString = connectionString;
-            _repository = new DailyChallengeRepository(connectionString);
+            if (dailyReset == null)
+            {
+                var databasePath = new SqliteConnectionStringBuilder(connectionString)
+                    .DataSource;
+                dailyReset = new DailyResetService(
+                    databasePath,
+                    ServerPaths.SchemaFilePath);
+            }
+
+            _repository = new DailyChallengeRepository(connectionString, dailyReset);
+        }
+
+        internal DailyChallengeInitializationResult EnsureInitialized(
+            int characterId)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+
+            int characterLevel;
+            using (var connection = new SqliteConnection(_connectionString))
+            {
+                connection.Open();
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT level
+FROM characters
+WHERE character_id = @cid;";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    var value = command.ExecuteScalar();
+                    if (value == null || value == DBNull.Value)
+                        throw new InvalidOperationException(
+                            $"Daily challenge character not found: {characterId}");
+                    characterLevel = Convert.ToInt32(value);
+                }
+            }
+
+            var plan = DailyChallengeData.BuildGenerationPlan(
+                characterId,
+                characterLevel,
+                DailyResetService.TodayId());
+            var result = _repository.EnsureInitialized(characterId, plan);
+            if (result.Refreshed)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] generated cid={characterId} "
+                    + $"level={characterLevel} groups={result.GroupCount} "
+                    + $"entries={result.EntryCount}");
+            }
+
+            return result;
         }
 
         internal bool TryHandleSetTrigger(
@@ -37,10 +89,20 @@ namespace DfoServer.Game.Quests
 
             var triggerType = body[2];
             var isIncrement = body.Length >= 4 && body[3] != 0;
+            var serverOwnedSuitableClear = QuestData
+                .TryGetSuitableDungeonClearChallengeRule(
+                    questId,
+                    out _);
             var stored = _repository.ApplyMutation(
                 characterId,
                 questId,
-                (target, current) => ApplyMutation(target, current, triggerType, isIncrement));
+                (target, current) => serverOwnedSuitableClear
+                    ? current
+                    : ApplyMutation(
+                        target,
+                        current,
+                        triggerType,
+                        isIncrement));
 
             if (!stored.Found)
             {
@@ -61,6 +123,13 @@ namespace DfoServer.Game.Quests
                     + $"remaining={stored.PreviousValue}->{stored.CurrentValue} "
                     + $"target={stored.TargetValue}");
             }
+            else if (serverOwnedSuitableClear && stored.Found)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] SET_TRIGGER echo server-owned suitable clear "
+                    + $"cid={characterId} quest={questId} "
+                    + $"remaining={stored.CurrentValue} target={stored.TargetValue}");
+            }
 
             result = new DailyChallengeSetTriggerResult(
                 new QuestSetTriggerResult
@@ -73,6 +142,32 @@ namespace DfoServer.Game.Quests
                 stored.Found,
                 stored.Changed);
             return true;
+        }
+
+        internal DailyChallengeDungeonClearResult ApplySuitableDungeonClear(
+            int characterId,
+            int dungeonId,
+            int difficulty,
+            int characterLevel,
+            Guid sourceEventId)
+        {
+            var result = _repository.ApplySuitableDungeonClear(
+                characterId,
+                dungeonId,
+                difficulty,
+                characterLevel,
+                sourceEventId);
+            if (result.ChangedEntries > 0 || result.SpecialChanged)
+            {
+                FileLogger.Log(
+                    $"[DailyChallenge] SUITABLE_DUNGEON_CLEAR cid={characterId} "
+                    + $"dungeon={dungeonId} difficulty={difficulty} "
+                    + $"level={characterLevel} event={sourceEventId:N} "
+                    + $"changed={result.ChangedEntries} "
+                    + $"specialChanged={result.SpecialChanged} "
+                    + $"specialProgress={result.Snapshot.DailyChallengeSpecialProgress}");
+            }
+            return result;
         }
 
         internal DailyChallengeResetResult ResetCharacter(int characterId)
@@ -91,190 +186,6 @@ namespace DfoServer.Game.Quests
             return result;
         }
 
-        internal DailyChallengeRewardClaimResult ClaimReward(
-            int characterId,
-            int characterLevel,
-            int groupIndex,
-            InventoryLease lease)
-        {
-            if (characterId <= 0
-                || groupIndex < 0
-                || groupIndex >= 6
-                || lease == null
-                || lease.CharacterId != characterId
-                || lease.Inventory == null)
-            {
-                return DailyChallengeRewardClaimResult.Rejected(
-                    DailyChallengeRewardClaimStatus.InvalidRequest,
-                    groupIndex,
-                    null);
-            }
-
-            lock (lease.SyncRoot)
-            {
-                SelectCharacterInitializationSnapshot snapshot = null;
-                RewardInventoryRollback rollback = null;
-                InventoryRewardGrantBatchResult grant = null;
-                var inventoryMutated = false;
-
-                try
-                {
-                    using (var connection = new SqliteConnection(_connectionString))
-                    {
-                        connection.Open();
-                        using (var transaction = connection.BeginTransaction(deferred: false))
-                        {
-                            var state = _repository.LoadRewardState(
-                                connection,
-                                transaction,
-                                characterId,
-                                groupIndex);
-                            snapshot = DailyChallengeRepository.LoadSnapshot(
-                                connection,
-                                transaction,
-                                characterId);
-
-                            if (!state.Found)
-                            {
-                                return DailyChallengeRewardClaimResult.Rejected(
-                                    DailyChallengeRewardClaimStatus.GroupUnavailable,
-                                    groupIndex,
-                                    snapshot);
-                            }
-
-                            if (state.Claimed)
-                            {
-                                transaction.Commit();
-                                return DailyChallengeRewardClaimResult.AlreadyClaimed(
-                                    groupIndex,
-                                    snapshot);
-                            }
-
-                            if (!DailyChallengeData.TryResolveReward(
-                                    groupIndex,
-                                    characterLevel,
-                                    state.EntryCount,
-                                    out var reward))
-                            {
-                                return DailyChallengeRewardClaimResult.Rejected(
-                                    DailyChallengeRewardClaimStatus.RewardUnavailable,
-                                    groupIndex,
-                                    snapshot);
-                            }
-
-                            if (state.CompletedEntryCount < reward.RequiredCompletionCount)
-                            {
-                                return DailyChallengeRewardClaimResult.Rejected(
-                                    DailyChallengeRewardClaimStatus.Incomplete,
-                                    groupIndex,
-                                    snapshot,
-                                    reward,
-                                    state.CompletedEntryCount);
-                            }
-
-                            var requests = new List<InventoryRewardGrantRequest>
-                            {
-                                InventoryRewardGrantRequest.Create(
-                                    reward.ItemId,
-                                    reward.ItemCount,
-                                    ItemCreateReason.QuestReward),
-                            };
-                            if (!InventoryRewardGrantService.TryPlanBatch(
-                                    lease.Inventory,
-                                    requests,
-                                    out var plan))
-                            {
-                                return DailyChallengeRewardClaimResult.Rejected(
-                                    DailyChallengeRewardClaimStatus.InventoryFull,
-                                    groupIndex,
-                                    snapshot,
-                                    reward,
-                                    state.CompletedEntryCount);
-                            }
-
-                            rollback = RewardInventoryRollback.Capture(
-                                lease.Inventory,
-                                plan.Entries[0]);
-                            if (!InventoryRewardGrantService.TryApplyPreparedBatch(
-                                    lease.Inventory,
-                                    plan,
-                                    out grant))
-                            {
-                                RewardInventoryRollback.Restore(lease.Inventory, rollback, grant);
-                                return DailyChallengeRewardClaimResult.Rejected(
-                                    DailyChallengeRewardClaimStatus.InventoryFull,
-                                    groupIndex,
-                                    snapshot,
-                                    reward,
-                                    state.CompletedEntryCount);
-                            }
-
-                            inventoryMutated = true;
-                            if (!_repository.TryMarkRewardClaimed(
-                                    connection,
-                                    transaction,
-                                    characterId,
-                                    groupIndex))
-                            {
-                                RewardInventoryRollback.Restore(lease.Inventory, rollback, grant);
-                                inventoryMutated = false;
-                                snapshot = DailyChallengeRepository.LoadSnapshot(
-                                    connection,
-                                    transaction,
-                                    characterId);
-                                transaction.Commit();
-                                return DailyChallengeRewardClaimResult.AlreadyClaimed(
-                                    groupIndex,
-                                    snapshot);
-                            }
-
-                            if (!InventoryPersistenceService.SaveDirtyInTransaction(
-                                    connection,
-                                    transaction,
-                                    lease))
-                            {
-                                throw new InvalidOperationException(
-                                    "daily challenge inventory persistence returned false");
-                            }
-
-                            snapshot = DailyChallengeRepository.LoadSnapshot(
-                                connection,
-                                transaction,
-                                characterId);
-                            transaction.Commit();
-                            lease.Inventory.ClearDirtyState();
-                            inventoryMutated = false;
-
-                            FileLogger.Log(
-                                $"[DailyChallenge] REWARD claimed cid={characterId} "
-                                + $"group={groupIndex} completed={state.CompletedEntryCount}/"
-                                + $"{reward.RequiredCompletionCount} item={reward.ItemId} "
-                                + $"count={reward.ItemCount}");
-                            return DailyChallengeRewardClaimResult.Succeeded(
-                                groupIndex,
-                                snapshot,
-                                reward,
-                                state.CompletedEntryCount,
-                                grant?.Changes);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    if (inventoryMutated)
-                        RewardInventoryRollback.Restore(lease.Inventory, rollback, grant);
-
-                    FileLogger.Log(
-                        $"[DailyChallenge] REWARD failed cid={characterId} "
-                        + $"group={groupIndex}: {ex.Message}");
-                    return DailyChallengeRewardClaimResult.Rejected(
-                        DailyChallengeRewardClaimStatus.PersistenceFailed,
-                        groupIndex,
-                        snapshot);
-                }
-            }
-        }
-
         private static uint ApplyMutation(
             uint target,
             uint storedCurrent,
@@ -286,145 +197,6 @@ namespace DfoServer.Game.Quests
                 .ApplyClientMutation(triggerType, isIncrement)
                 .PackedValue;
             return Math.Min(target, next);
-        }
-    }
-
-    internal enum DailyChallengeRewardClaimStatus
-    {
-        Success,
-        AlreadyClaimed,
-        InvalidRequest,
-        GroupUnavailable,
-        RewardUnavailable,
-        Incomplete,
-        InventoryFull,
-        PersistenceFailed,
-    }
-
-    internal sealed class DailyChallengeRewardClaimResult
-    {
-        internal DailyChallengeRewardClaimStatus Status { get; private set; }
-        internal int GroupIndex { get; private set; }
-        internal int ItemId { get; private set; }
-        internal int ItemCount { get; private set; }
-        internal int RequiredCompletionCount { get; private set; }
-        internal int CompletedEntryCount { get; private set; }
-        internal SelectCharacterInitializationSnapshot Snapshot { get; private set; }
-        internal InventoryMutationSet Changes { get; private set; } = new InventoryMutationSet();
-        internal bool ClientSuccess => Status == DailyChallengeRewardClaimStatus.Success
-            || Status == DailyChallengeRewardClaimStatus.AlreadyClaimed;
-        internal bool GrantedReward => Status == DailyChallengeRewardClaimStatus.Success;
-
-        internal static DailyChallengeRewardClaimResult Succeeded(
-            int groupIndex,
-            SelectCharacterInitializationSnapshot snapshot,
-            DailyChallengeRewardDefinition reward,
-            int completed,
-            InventoryMutationSet changes)
-        {
-            var result = Create(
-                DailyChallengeRewardClaimStatus.Success,
-                groupIndex,
-                snapshot,
-                reward,
-                completed);
-            result.Changes.AddRange(changes);
-            return result;
-        }
-
-        internal static DailyChallengeRewardClaimResult AlreadyClaimed(
-            int groupIndex,
-            SelectCharacterInitializationSnapshot snapshot) =>
-            Create(
-                DailyChallengeRewardClaimStatus.AlreadyClaimed,
-                groupIndex,
-                snapshot,
-                null,
-                0);
-
-        internal static DailyChallengeRewardClaimResult Rejected(
-            DailyChallengeRewardClaimStatus status,
-            int groupIndex,
-            SelectCharacterInitializationSnapshot snapshot,
-            DailyChallengeRewardDefinition reward = null,
-            int completed = 0) =>
-            Create(status, groupIndex, snapshot, reward, completed);
-
-        private static DailyChallengeRewardClaimResult Create(
-            DailyChallengeRewardClaimStatus status,
-            int groupIndex,
-            SelectCharacterInitializationSnapshot snapshot,
-            DailyChallengeRewardDefinition reward,
-            int completed) =>
-            new DailyChallengeRewardClaimResult
-            {
-                Status = status,
-                GroupIndex = groupIndex,
-                ItemId = reward?.ItemId ?? 0,
-                ItemCount = reward?.ItemCount ?? 0,
-                RequiredCompletionCount = reward?.RequiredCompletionCount ?? 0,
-                CompletedEntryCount = completed,
-                Snapshot = snapshot,
-            };
-    }
-
-    internal sealed class RewardInventoryRollback
-    {
-        internal InventoryRewardGrantKind Kind { get; private set; }
-        internal InventoryListType ListType { get; private set; }
-        internal short SlotIndex { get; private set; }
-        internal ItemCore PreviousItem { get; private set; }
-        internal VirtualCountItem PreviousVirtualCount { get; private set; }
-
-        internal static RewardInventoryRollback Capture(
-            InventoryService inventory,
-            InventoryRewardGrantPlanEntry entry)
-        {
-            var snapshot = new RewardInventoryRollback
-            {
-                Kind = entry.Kind,
-                ListType = entry.ListType,
-                SlotIndex = entry.SlotIndex,
-            };
-            if (entry.Kind == InventoryRewardGrantKind.InventoryItem)
-                snapshot.PreviousItem = inventory.GetItem(entry.ListType, entry.SlotIndex)?.Copy();
-            else if (entry.Kind == InventoryRewardGrantKind.MainVirtualCount)
-                snapshot.PreviousVirtualCount = inventory.GetMainVirtualCount(entry.SlotIndex);
-            return snapshot;
-        }
-
-        internal static void Restore(
-            InventoryService inventory,
-            RewardInventoryRollback snapshot,
-            InventoryRewardGrantBatchResult grant)
-        {
-            if (inventory == null || snapshot == null)
-                return;
-
-            if (grant != null)
-            {
-                foreach (var result in grant.Results)
-                    InventoryCreateService.DetachCreatedDetails(inventory, result.CreateResult);
-            }
-
-            if (snapshot.Kind == InventoryRewardGrantKind.InventoryItem)
-            {
-                if (snapshot.PreviousItem == null)
-                    inventory.RemoveItem(snapshot.ListType, snapshot.SlotIndex);
-                else
-                    inventory.SetItem(
-                        snapshot.ListType,
-                        snapshot.SlotIndex,
-                        snapshot.PreviousItem.Copy());
-            }
-            else if (snapshot.Kind == InventoryRewardGrantKind.MainVirtualCount
-                && snapshot.PreviousVirtualCount != null)
-            {
-                inventory.SetMainVirtualCount(
-                    snapshot.SlotIndex,
-                    snapshot.PreviousVirtualCount.ItemId,
-                    snapshot.PreviousVirtualCount.Count);
-            }
         }
     }
 

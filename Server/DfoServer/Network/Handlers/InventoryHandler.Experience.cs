@@ -120,8 +120,16 @@ namespace DfoServer.Network.Handlers
             {
                 await _experienceItemNotifications.SendAsync(session, result);
             }
-            FileLogger.Log(
-                $"[{ProtocolName}] INCREASE_STATUS experience: item={result.ItemTemplateId} slot={request.SlotIndex} remaining={result.ConsumedItem?.RemainingStackCount ?? 0} grant={result.GrantedExp} level={result.PreviousLevel}->{result.NewLevel} exp={result.PreviousExp}->{result.NewExp}");
+            if (result.IsSkillPointBook)
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] INCREASE_STATUS skill-point-book: item={result.ItemTemplateId} slot={request.SlotIndex} remaining={result.ConsumedItem?.RemainingStackCount ?? 0} grantSp={result.GrantedSp} grantTp={result.GrantedTp}");
+            }
+            else
+            {
+                FileLogger.Log(
+                    $"[{ProtocolName}] INCREASE_STATUS experience: item={result.ItemTemplateId} slot={request.SlotIndex} remaining={result.ConsumedItem?.RemainingStackCount ?? 0} grant={result.GrantedExp} level={result.PreviousLevel}->{result.NewLevel} exp={result.PreviousExp}->{result.NewExp}");
+            }
         }
 
         private static Task SendIncreaseStatusFailureAsync(

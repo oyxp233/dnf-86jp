@@ -1,17 +1,106 @@
 using System;
 using System.Collections.Generic;
+using DfoServer.Game.DailyReset;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.Quests
 {
     internal sealed class DailyChallengeRepository
     {
-        private readonly string _connectionString;
+        private const string GeneratedTodayCounterKey =
+            "daily_challenge_generated";
 
-        internal DailyChallengeRepository(string connectionString)
+        private readonly string _connectionString;
+        private readonly DailyResetService _dailyReset;
+
+        internal DailyChallengeRepository(
+            string connectionString,
+            DailyResetService dailyReset)
         {
             _connectionString = connectionString;
+            _dailyReset = dailyReset ?? throw new ArgumentNullException(nameof(dailyReset));
+        }
+
+        internal DailyChallengeInitializationResult EnsureInitialized(
+            int characterId,
+            DailyChallengeGenerationPlan plan)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+            if (plan == null)
+                throw new ArgumentNullException(nameof(plan));
+            if (plan.Groups.Count == 0)
+                throw new InvalidOperationException(
+                    "Daily challenge PVF produced no eligible groups; existing ledger was preserved.");
+
+            using (var connection = new SqliteConnection(_connectionString))
+            {
+                connection.Open();
+                using (var transaction = connection.BeginTransaction(deferred: false))
+                {
+                    var firstInitializationToday = _dailyReset.TryClaimFlag(
+                        connection,
+                        transaction,
+                        characterId,
+                        GeneratedTodayCounterKey);
+                    var existingGroupCount = CountGroups(
+                        connection,
+                        transaction,
+                        characterId);
+                    var refreshed = firstInitializationToday || existingGroupCount == 0;
+                    var entryCount = 0;
+                    if (refreshed)
+                    {
+                        ClearLedger(connection, transaction, characterId);
+                        foreach (var group in plan.Groups)
+                        {
+                            InsertGroup(connection, transaction, characterId, group);
+                            foreach (var entry in group.Entries)
+                            {
+                                InsertEntry(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    group.GroupIndex,
+                                    entry);
+                                entryCount++;
+                            }
+                        }
+
+                        InsertSpecialState(
+                            connection,
+                            transaction,
+                            characterId,
+                            plan.SpecialChallenge);
+                    }
+                    else
+                    {
+                        // Existing characters can receive this feature halfway
+                        // through a day. Backfill the state without regenerating
+                        // or disturbing today's ordinary challenge selection.
+                        EnsureSpecialState(
+                            connection,
+                            transaction,
+                            characterId,
+                            plan.SpecialChallenge);
+                    }
+
+                    var snapshot = LoadSnapshot(
+                        connection,
+                        transaction,
+                        characterId);
+                    transaction.Commit();
+                    return new DailyChallengeInitializationResult(
+                        refreshed,
+                        snapshot.RacingDungeonGroups.Count,
+                        refreshed
+                            ? entryCount
+                            : CountEntries(snapshot),
+                        snapshot);
+                }
+            }
         }
 
         internal DailyChallengeStoreResult ApplyMutation(
@@ -76,6 +165,10 @@ WHERE character_id = @cid
                 connection.Open();
                 using (var transaction = connection.BeginTransaction(deferred: false))
                 {
+                    ClearEntryQuestCompletionFlags(
+                        connection,
+                        transaction,
+                        characterId);
                     int changedEntries;
                     using (var command = new SqliteCommand(@"
 UPDATE character_daily_challenge_entries
@@ -94,6 +187,33 @@ WHERE character_id = @cid;", connection, transaction))
                     {
                         command.Parameters.AddWithValue("@cid", characterId);
                         clearedClaims = command.ExecuteNonQuery();
+                    }
+
+                    using (var command = new SqliteCommand(@"
+DELETE FROM character_daily_challenge_entry_claims
+WHERE character_id = @cid;", connection, transaction))
+                    {
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        clearedClaims += command.ExecuteNonQuery();
+                    }
+
+                    using (var command = new SqliteCommand(@"
+DELETE FROM character_daily_challenge_progress_events
+WHERE character_id = @cid;", connection, transaction))
+                    {
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        command.ExecuteNonQuery();
+                    }
+
+                    using (var command = new SqliteCommand(@"
+DELETE FROM character_daily_challenge_special_progress_events
+WHERE character_id = @cid;
+UPDATE character_daily_challenge_special_state
+SET progress_value = 0
+WHERE character_id = @cid;", connection, transaction))
+                    {
+                        command.Parameters.AddWithValue("@cid", characterId);
+                        command.ExecuteNonQuery();
                     }
 
                     var snapshot = LoadSnapshot(connection, transaction, characterId);
@@ -213,6 +333,495 @@ LIMIT 1;", connection, transaction))
             }
         }
 
+        internal static DailyChallengeEntryRewardState LoadEntryRewardState(
+            string connectionString,
+            int characterId,
+            ushort questId)
+        {
+            using (var connection = new SqliteConnection(connectionString))
+            {
+                connection.Open();
+                using (var transaction = connection.BeginTransaction())
+                {
+                    var state = LoadEntryRewardState(
+                        connection,
+                        transaction,
+                        characterId,
+                        questId);
+                    transaction.Commit();
+                    return state;
+                }
+            }
+        }
+
+        private static List<DailyChallengeEntryRecord> LoadEntryRecords(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            var entries = new List<DailyChallengeEntryRecord>();
+            using (var command = new SqliteCommand(@"
+SELECT group_index, entry_index, track_like_id, value_a, value_b
+FROM character_daily_challenge_entries
+WHERE character_id = @cid
+ORDER BY group_index, entry_index;", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = command.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        entries.Add(new DailyChallengeEntryRecord
+                        {
+                            GroupIndex = reader.GetInt32(0),
+                            EntryIndex = reader.GetInt32(1),
+                            QuestId = reader.GetInt32(2),
+                            ValueA = (uint)reader.GetInt64(3),
+                            ValueB = (uint)reader.GetInt64(4),
+                        });
+                    }
+                }
+            }
+            return entries;
+        }
+
+        private static bool TryClaimDungeonClearEvent(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            Guid sourceEventId,
+            DailyChallengeEntryRecord entry)
+        {
+            using (var command = new SqliteCommand(@"
+INSERT OR IGNORE INTO character_daily_challenge_progress_events
+    (character_id, source_event_id, group_index, entry_index, quest_id)
+VALUES (@cid, @eventId, @groupIndex, @entryIndex, @questId);",
+                connection,
+                transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue(
+                    "@eventId",
+                    sourceEventId.ToString("N"));
+                command.Parameters.AddWithValue("@groupIndex", entry.GroupIndex);
+                command.Parameters.AddWithValue("@entryIndex", entry.EntryIndex);
+                command.Parameters.AddWithValue("@questId", entry.QuestId);
+                return command.ExecuteNonQuery() == 1;
+            }
+        }
+
+        private static bool TryClaimSpecialDungeonClearEvent(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            Guid sourceEventId)
+        {
+            using (var command = new SqliteCommand(@"
+INSERT OR IGNORE INTO character_daily_challenge_special_progress_events
+    (character_id, source_event_id)
+VALUES (@cid, @eventId);", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue(
+                    "@eventId",
+                    sourceEventId.ToString("N"));
+                return command.ExecuteNonQuery() == 1;
+            }
+        }
+
+        internal DailyChallengeDungeonClearResult ApplySuitableDungeonClear(
+            int characterId,
+            int dungeonId,
+            int difficulty,
+            int characterLevel,
+            Guid sourceEventId)
+        {
+            if (characterId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(characterId));
+            if (dungeonId <= 0)
+                throw new ArgumentOutOfRangeException(nameof(dungeonId));
+            if (sourceEventId == Guid.Empty)
+            {
+                throw new ArgumentException(
+                    "A stable dungeon-clear event id is required.",
+                    nameof(sourceEventId));
+            }
+
+            using (var connection = new SqliteConnection(_connectionString))
+            {
+                connection.Open();
+                using (var transaction = connection.BeginTransaction(deferred: false))
+                {
+                    var relevantEntries = 0;
+                    var changedEntries = 0;
+                    var specialRelevant = false;
+                    var specialChanged = false;
+                    var suitableDungeon = GameWorld.Dungeon.IsSuitableLevelDungeon(
+                        dungeonId,
+                        characterLevel);
+                    if (suitableDungeon)
+                    {
+                        foreach (var entry in LoadEntryRecords(
+                            connection,
+                            transaction,
+                            characterId))
+                        {
+                            if (!QuestData
+                                    .TryGetSuitableDungeonClearChallengeRule(
+                                        entry.QuestId,
+                                        out var minimumDifficulty)
+                                || (minimumDifficulty >= 0
+                                    && difficulty < minimumDifficulty))
+                            {
+                                continue;
+                            }
+
+                            relevantEntries++;
+                            if (entry.ValueB == 0
+                                || !TryClaimDungeonClearEvent(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    sourceEventId,
+                                    entry))
+                            {
+                                continue;
+                            }
+
+                            using (var command = new SqliteCommand(@"
+UPDATE character_daily_challenge_entries
+SET value_b = value_b - 1
+WHERE character_id = @cid
+  AND group_index = @groupIndex
+  AND entry_index = @entryIndex
+  AND track_like_id = @questId
+  AND value_b > 0;", connection, transaction))
+                            {
+                                command.Parameters.AddWithValue("@cid", characterId);
+                                command.Parameters.AddWithValue("@groupIndex", entry.GroupIndex);
+                                command.Parameters.AddWithValue("@entryIndex", entry.EntryIndex);
+                                command.Parameters.AddWithValue("@questId", entry.QuestId);
+                                if (command.ExecuteNonQuery() != 1)
+                                {
+                                    throw new InvalidOperationException(
+                                        "Daily challenge suitable-dungeon progress CAS failed.");
+                                }
+                                changedEntries++;
+                            }
+                        }
+
+
+                        using (var command = new SqliteCommand(@"
+SELECT challenge_type, target_value, progress_value
+FROM character_daily_challenge_special_state
+WHERE character_id = @cid;", connection, transaction))
+                        {
+                            command.Parameters.AddWithValue("@cid", characterId);
+                            using (var reader = command.ExecuteReader())
+                            {
+                                if (reader.Read()
+                                    && DailyChallengeData
+                                        .IsSuitableDungeonClearSpecialChallenge(
+                                            reader.GetInt32(0)))
+                                {
+                                    specialRelevant = true;
+                                    var target = reader.GetInt32(1);
+                                    var progress = reader.GetInt32(2);
+                                    reader.Close();
+                                    if (progress < target
+                                        && TryClaimSpecialDungeonClearEvent(
+                                            connection,
+                                            transaction,
+                                            characterId,
+                                            sourceEventId))
+                                    {
+                                        using (var update = new SqliteCommand(@"
+UPDATE character_daily_challenge_special_state
+SET progress_value = progress_value + 1
+WHERE character_id = @cid
+  AND progress_value < target_value;", connection, transaction))
+                                        {
+                                            update.Parameters.AddWithValue("@cid", characterId);
+                                            if (update.ExecuteNonQuery() != 1)
+                                            {
+                                                throw new InvalidOperationException(
+                                                    "Daily challenge special progress CAS failed.");
+                                            }
+                                            specialChanged = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    var snapshot = LoadSnapshot(
+                        connection,
+                        transaction,
+                        characterId);
+                    transaction.Commit();
+                    return new DailyChallengeDungeonClearResult(
+                        relevantEntries,
+                        changedEntries,
+                        specialRelevant,
+                        specialChanged,
+                        snapshot);
+                }
+            }
+        }
+
+        internal static DailyChallengeEntryRewardState LoadEntryRewardState(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            ushort questId)
+        {
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection));
+            if (transaction == null)
+                throw new ArgumentNullException(nameof(transaction));
+
+            var state = new DailyChallengeEntryRewardState
+            {
+                QuestId = questId,
+            };
+            using (var command = new SqliteCommand(@"
+SELECT e.group_index,
+       e.entry_index,
+       e.value_a,
+       e.value_b,
+       CASE WHEN c.character_id IS NULL THEN 0 ELSE 1 END
+FROM character_daily_challenge_entries AS e
+LEFT JOIN character_daily_challenge_entry_claims AS c
+  ON c.character_id = e.character_id
+ AND c.group_index = e.group_index
+ AND c.entry_index = e.entry_index
+ AND c.quest_id = e.track_like_id
+WHERE e.character_id = @cid
+  AND e.track_like_id = @questId
+ORDER BY e.group_index, e.entry_index
+LIMIT 1;", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@questId", (int)questId);
+                using (var reader = command.ExecuteReader())
+                {
+                    if (!reader.Read())
+                        return state;
+
+                    state.Found = true;
+                    state.GroupIndex = reader.GetInt32(0);
+                    state.EntryIndex = reader.GetInt32(1);
+                    state.TargetValue = (uint)reader.GetInt64(2);
+                    state.RemainingValue = (uint)reader.GetInt64(3);
+                    state.Claimed = reader.GetInt32(4) != 0;
+                }
+            }
+            return state;
+        }
+
+        internal static bool TryMarkEntryRewardClaimed(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            DailyChallengeEntryRewardState expected)
+        {
+            if (connection == null)
+                throw new ArgumentNullException(nameof(connection));
+            if (transaction == null)
+                throw new ArgumentNullException(nameof(transaction));
+            if (expected == null || !expected.Found || !expected.Completed)
+                return false;
+
+            using (var command = new SqliteCommand(@"
+INSERT INTO character_daily_challenge_entry_claims
+    (character_id, group_index, entry_index, quest_id)
+SELECT e.character_id, e.group_index, e.entry_index, e.track_like_id
+FROM character_daily_challenge_entries AS e
+WHERE e.character_id = @cid
+  AND e.group_index = @groupIndex
+  AND e.entry_index = @entryIndex
+  AND e.track_like_id = @questId
+  AND e.value_a = @target
+  AND e.value_b = 0
+ON CONFLICT(character_id, group_index, entry_index) DO NOTHING;",
+                connection,
+                transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@groupIndex", expected.GroupIndex);
+                command.Parameters.AddWithValue("@entryIndex", expected.EntryIndex);
+                command.Parameters.AddWithValue("@questId", (int)expected.QuestId);
+                command.Parameters.AddWithValue("@target", (long)expected.TargetValue);
+                return command.ExecuteNonQuery() == 1;
+            }
+        }
+
+        private static int CountGroups(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            using (var command = new SqliteCommand(@"
+SELECT COUNT(*)
+FROM character_daily_challenge_groups
+WHERE character_id = @cid;", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                return Convert.ToInt32(command.ExecuteScalar());
+            }
+        }
+
+        private static int CountEntries(SelectCharacterInitializationSnapshot snapshot)
+        {
+            var count = 0;
+            foreach (var group in snapshot.RacingDungeonGroups)
+                count += group.Entries.Count;
+            return count;
+        }
+
+        private static void ClearLedger(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            ClearEntryQuestCompletionFlags(
+                connection,
+                transaction,
+                characterId);
+            foreach (var table in new[]
+            {
+                "character_daily_challenge_special_progress_events",
+                "character_daily_challenge_special_state",
+                "character_daily_challenge_progress_events",
+                "character_daily_challenge_entry_claims",
+                "character_daily_challenge_entries",
+                "character_daily_challenge_claims",
+                "character_daily_challenge_tail_ids",
+                "character_daily_challenge_groups",
+            })
+            {
+                using (var command = new SqliteCommand(
+                    $"DELETE FROM {table} WHERE character_id = @cid;",
+                    connection,
+                    transaction))
+                {
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private static void ClearEntryQuestCompletionFlags(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            using (var command = new SqliteCommand(@"
+DELETE FROM character_invisible_falgs
+WHERE character_id = @cid
+  AND slot_index IN (
+      SELECT track_like_id
+      FROM character_daily_challenge_entries
+      WHERE character_id = @cid
+  );", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertGroup(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            DailyChallengeGenerationGroup group)
+        {
+            using (var command = new SqliteCommand(@"
+INSERT INTO character_daily_challenge_groups
+    (character_id, group_index, group_id)
+VALUES (@cid, @groupIndex, @groupId);", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@groupIndex", group.GroupIndex);
+                command.Parameters.AddWithValue("@groupId", group.GroupId);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertSpecialState(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            DailyChallengeSpecialDefinition special)
+        {
+            if (special == null
+                || special.ChallengeType <= 0
+                || special.TargetValue <= 0)
+            {
+                return;
+            }
+
+            using (var command = new SqliteCommand(@"
+INSERT INTO character_daily_challenge_special_state
+    (character_id, challenge_type, target_value, progress_value)
+VALUES (@cid, @challengeType, @target, 0);", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@challengeType", special.ChallengeType);
+                command.Parameters.AddWithValue("@target", special.TargetValue);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static void EnsureSpecialState(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            DailyChallengeSpecialDefinition special)
+        {
+            if (special == null
+                || special.ChallengeType <= 0
+                || special.TargetValue <= 0)
+            {
+                return;
+            }
+
+            using (var command = new SqliteCommand(@"
+INSERT OR IGNORE INTO character_daily_challenge_special_state
+    (character_id, challenge_type, target_value, progress_value)
+VALUES (@cid, @challengeType, @target, 0);", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@challengeType", special.ChallengeType);
+                command.Parameters.AddWithValue("@target", special.TargetValue);
+                command.ExecuteNonQuery();
+            }
+        }
+
+        private static void InsertEntry(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            int groupIndex,
+            DailyChallengeGenerationEntry entry)
+        {
+            using (var command = new SqliteCommand(@"
+INSERT INTO character_daily_challenge_entries
+    (character_id, group_index, entry_index, track_like_id, value_a, value_b)
+VALUES (@cid, @groupIndex, @entryIndex, @questId, @target, @target);",
+                connection,
+                transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@groupIndex", groupIndex);
+                command.Parameters.AddWithValue("@entryIndex", entry.EntryIndex);
+                command.Parameters.AddWithValue("@questId", entry.QuestId);
+                command.Parameters.AddWithValue("@target", (long)entry.TargetValue);
+                command.ExecuteNonQuery();
+            }
+        }
+
         internal static SelectCharacterInitializationSnapshot LoadSnapshot(
             SqliteConnection connection,
             SqliteTransaction transaction,
@@ -297,6 +906,24 @@ ORDER BY group_index;", connection, transaction))
             }
 
             using (var command = new SqliteCommand(@"
+SELECT target_value, progress_value
+FROM character_daily_challenge_special_state
+WHERE character_id = @cid;", connection, transaction))
+            {
+                command.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = command.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        snapshot.DailyChallengeSpecialTarget =
+                            (uint)reader.GetInt64(0);
+                        snapshot.DailyChallengeSpecialProgress =
+                            (uint)reader.GetInt64(1);
+                    }
+                }
+            }
+
+            using (var command = new SqliteCommand(@"
 SELECT id_value
 FROM character_daily_challenge_tail_ids
 WHERE character_id = @cid
@@ -317,6 +944,7 @@ ORDER BY sort_order;", connection, transaction))
         {
             internal int GroupIndex;
             internal int EntryIndex;
+            internal int QuestId;
             internal uint ValueA;
             internal uint ValueB;
         }
@@ -330,6 +958,39 @@ ORDER BY sort_order;", connection, transaction))
         internal int EntryCount { get; set; }
         internal int CompletedEntryCount { get; set; }
         internal bool Claimed { get; set; }
+    }
+
+    internal sealed class DailyChallengeEntryRewardState
+    {
+        internal bool Found { get; set; }
+        internal int GroupIndex { get; set; }
+        internal int EntryIndex { get; set; }
+        internal ushort QuestId { get; set; }
+        internal uint TargetValue { get; set; }
+        internal uint RemainingValue { get; set; }
+        internal bool Claimed { get; set; }
+        internal bool Completed => Found && RemainingValue == 0;
+        internal bool CanClaim => Completed && !Claimed;
+    }
+
+    internal sealed class DailyChallengeInitializationResult
+    {
+        internal DailyChallengeInitializationResult(
+            bool refreshed,
+            int groupCount,
+            int entryCount,
+            SelectCharacterInitializationSnapshot snapshot)
+        {
+            Refreshed = refreshed;
+            GroupCount = groupCount;
+            EntryCount = entryCount;
+            Snapshot = snapshot;
+        }
+
+        internal bool Refreshed { get; }
+        internal int GroupCount { get; }
+        internal int EntryCount { get; }
+        internal SelectCharacterInitializationSnapshot Snapshot { get; }
     }
 
     internal sealed class DailyChallengeStoreResult
@@ -380,6 +1041,30 @@ ORDER BY sort_order;", connection, transaction))
 
         internal int ChangedEntries { get; }
         internal int ClearedClaims { get; }
+        internal SelectCharacterInitializationSnapshot Snapshot { get; }
+    }
+
+    internal sealed class DailyChallengeDungeonClearResult
+    {
+        internal DailyChallengeDungeonClearResult(
+            int relevantEntries,
+            int changedEntries,
+            bool specialRelevant,
+            bool specialChanged,
+            SelectCharacterInitializationSnapshot snapshot)
+        {
+            RelevantEntries = relevantEntries;
+            ChangedEntries = changedEntries;
+            SpecialRelevant = specialRelevant;
+            SpecialChanged = specialChanged;
+            Snapshot = snapshot;
+        }
+
+        internal int RelevantEntries { get; }
+        internal int ChangedEntries { get; }
+        internal bool SpecialRelevant { get; }
+        internal bool SpecialChanged { get; }
+        internal bool HasRelevantProgress => RelevantEntries > 0 || SpecialRelevant;
         internal SelectCharacterInitializationSnapshot Snapshot { get; }
     }
 }

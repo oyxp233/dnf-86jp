@@ -63,7 +63,8 @@ namespace DfoServer.Game.Lottery
 
             var validRewards = (rewardPool ?? Array.Empty<PvfLib.BoosterRewardEntry>())
                 .Where(reward => reward != null
-                    && reward.ItemId > 0
+                    // PVF 用 itemId=0 表示金币奖励；不能把金币罐的唯一奖励行过滤掉。
+                    && reward.ItemId >= 0
                     && reward.Count > 0
                     && reward.Weight > 0)
                 .Select(CloneReward)

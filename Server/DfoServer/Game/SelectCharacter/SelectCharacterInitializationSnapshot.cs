@@ -61,6 +61,10 @@ namespace DfoServer.Game.SelectCharacter
 
         public uint DailyChallengeCharacterLevel { get; set; } = 1;
 
+        public uint DailyChallengeSpecialTarget { get; set; }
+
+        public uint DailyChallengeSpecialProgress { get; set; }
+
         public List<RacingDungeonGroupSnapshot> RacingDungeonGroups { get; } = new List<RacingDungeonGroupSnapshot>();
 
         public byte[] DailyChallengeRewardClaimFlags { get; set; } = new byte[6];

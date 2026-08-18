@@ -4,6 +4,7 @@ using System.Linq;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Skills;
 using DfoServer.Infrastructure;
+using DfoServer.Sqlite;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests
@@ -86,8 +87,9 @@ namespace DfoServer.SelfTests
                 using var command = connection.CreateCommand();
                 command.CommandText = "PRAGMA user_version;";
                 Check(
-                    "PvP skill tables are installed by migration v52",
-                    Convert.ToInt32(command.ExecuteScalar()) == 52,
+                    "PvP skill database reaches the latest migration",
+                    Convert.ToInt32(command.ExecuteScalar())
+                        == SqliteMigrations.LatestVersion,
                     ref failures);
             }
             catch (Exception ex)

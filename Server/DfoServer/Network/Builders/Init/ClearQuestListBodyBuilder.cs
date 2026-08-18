@@ -1,5 +1,6 @@
 using DfoServer.Game.SelectCharacter;
 using System;
+using System.Collections.Generic;
 
 namespace DfoServer.Network.Builders
 {
@@ -12,14 +13,32 @@ namespace DfoServer.Network.Builders
         public bool TryBuild(SelectCharacterDataSnapshot snapshot, int occurrenceIndex, out byte[] body)
         {
             var init = snapshot.InitializationSnapshot;
-            body = new byte[4 + PayloadLength];
-            Buffer.BlockCopy(BitConverter.GetBytes(PayloadLength), 0, body, 0, 4);
+            var clearedFlags = new Dictionary<int, int>();
             foreach (var entry in init.CharacInvisibleFalgs)
-            {
-                if (entry.SlotIndex < PayloadLength)
-                    body[4 + entry.SlotIndex] = entry.FlagValue;
-            }
+                clearedFlags[entry.SlotIndex] = entry.FlagValue;
+            body = BuildBody(clearedFlags);
             return true;
+        }
+
+        internal static byte[] BuildBody(
+            IReadOnlyDictionary<int, int> clearedFlags)
+        {
+            var body = new byte[4 + PayloadLength];
+            Buffer.BlockCopy(
+                BitConverter.GetBytes(PayloadLength),
+                0,
+                body,
+                0,
+                4);
+            if (clearedFlags == null)
+                return body;
+
+            foreach (var entry in clearedFlags)
+            {
+                if (entry.Key >= 0 && entry.Key < PayloadLength)
+                    body[4 + entry.Key] = (byte)entry.Value;
+            }
+            return body;
         }
     }
 }

@@ -91,6 +91,14 @@ namespace DfoServer.GameWorld
                     continue;
                 }
 
+                // 在生成可接任务列表时隐藏特殊职业不应出现的转职任务。
+                if (QuestData.IsProfessionQuestBlockedForJob(
+                        quest,
+                        characterJob))
+                {
+                    continue;
+                }
+
                 if (quest.CreatureKind >= 0
                     && (allowedCreatureKinds == null
                         || !allowedCreatureKinds.Contains(quest.CreatureKind)))

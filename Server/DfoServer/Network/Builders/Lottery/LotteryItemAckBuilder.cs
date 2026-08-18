@@ -60,6 +60,26 @@ namespace DfoServer.Network.Builders
             return writer.ToArray();
         }
 
+        internal static byte[] BuildGoldResult(short sourceSlotIndex, int grantedGold)
+        {
+            if (grantedGold <= 0)
+                return BuildError();
+
+            // 金币罐没有实体奖励格；客户端要求 itemId=0、数量=金币数的原生结果结构。
+            var writer = new GamePacketWriter();
+            writer.WriteByte(0x01);
+            writer.WriteInt16(sourceSlotIndex);
+            writer.WriteInt16(0);
+            writer.WriteInt32(0);
+            writer.WriteInt32(grantedGold);
+            writer.WriteUInt16(0);
+            writer.WriteByte(0);
+            writer.WriteByte(0);
+            writer.WriteUInt16(0);
+            WriteEmptyInvenItemTail(writer);
+            return writer.ToArray();
+        }
+
         public static byte[] BuildError()
         {
             var writer = new GamePacketWriter();

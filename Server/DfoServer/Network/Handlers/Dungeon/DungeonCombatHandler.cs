@@ -617,6 +617,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x00, 0x0027,
                     DropItemBuilder.BuildPickupItem(req.SrcSlot, session.Player.UserId, (ushort)pickup.InventorySlot, 7)));
+                // 红字装备掉落入包后需要通知客户端更新装备信息
+                if (pickup.IsAmplify)
+                {
+                    await InventoryRefreshSender.SendOnlineUpdateItemList(
+                        session,
+                        InventoryListType.Main,
+                        pickup.InventorySlot);
+                }
                 if (session.Player.IsCurrentDungeonRun(runIdentity)
                     && session.GameSession?.QuestManager != null
                     && pickup.PickedUpItemId > 0)

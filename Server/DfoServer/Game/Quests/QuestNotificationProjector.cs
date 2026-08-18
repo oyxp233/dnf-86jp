@@ -231,7 +231,22 @@ namespace DfoServer.Game.Quests
                     result.PetCreatureEvolution);
             }
 
+            if (QuestData.IsDailyChallengeQuest(result.QuestId))
+                await SendClearedQuestListAsync(characterId);
+
             await SendAcceptableQuestListAsync();
+        }
+
+        private async Task SendClearedQuestListAsync(int characterId)
+        {
+            var clearedFlags = new QuestRepository(_connectionString)
+                .LoadClearedFlags(characterId);
+            await _sender.SendNotiAsync(
+                0x0164,
+                ClearQuestListBodyBuilder.BuildBody(clearedFlags));
+            FileLogger.Log(
+                $"[QuestNotificationProjector] daily challenge clear list refreshed: "
+                + $"cid={characterId} flags={clearedFlags.Count}");
         }
 
         internal async Task SendActiveQuestListAsync(int characterId)

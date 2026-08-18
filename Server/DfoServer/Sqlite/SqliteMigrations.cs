@@ -668,7 +668,74 @@ CREATE TABLE IF NOT EXISTS character_pvp_skills (
     UNIQUE (character_id, page_index, skill_id),
     FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
 );")),
+
+            (53, "daily challenge entry reward claims", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_daily_challenge_entry_claims (
+    character_id INTEGER NOT NULL,
+    group_index INTEGER NOT NULL CHECK (group_index >= 0 AND group_index < 6),
+    entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+    quest_id INTEGER NOT NULL CHECK (quest_id > 0),
+    claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, group_index, entry_index),
+    FOREIGN KEY (character_id, group_index, entry_index)
+        REFERENCES character_daily_challenge_entries(character_id, group_index, entry_index)
+        ON DELETE CASCADE
+);")),
+
+            (54, "project claimed challenge entries into client clear flags", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_invisible_falgs (
+    character_id INTEGER NOT NULL,
+    slot_index INTEGER NOT NULL,
+    flag_value INTEGER NOT NULL,
+    PRIMARY KEY (character_id, slot_index),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+INSERT INTO character_invisible_falgs (character_id, slot_index, flag_value)
+SELECT character_id, quest_id, 1
+FROM character_daily_challenge_entry_claims
+WHERE 1 = 1
+ON CONFLICT(character_id, slot_index)
+DO UPDATE SET flag_value = excluded.flag_value;")),
+
+            (55, "daily challenge authoritative dungeon-clear events", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_daily_challenge_progress_events (
+    character_id INTEGER NOT NULL,
+    source_event_id TEXT NOT NULL,
+    group_index INTEGER NOT NULL CHECK (group_index >= 0 AND group_index < 6),
+    entry_index INTEGER NOT NULL CHECK (entry_index >= 0),
+    quest_id INTEGER NOT NULL CHECK (quest_id > 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, source_event_id, group_index, entry_index),
+    FOREIGN KEY (character_id, group_index, entry_index)
+        REFERENCES character_daily_challenge_entries(character_id, group_index, entry_index)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_daily_challenge_progress_events_character
+    ON character_daily_challenge_progress_events(character_id, created_at);")),
+
+            (56, "daily challenge special progress and settlement dedupe", conn => ExecuteBatch(conn, @"
+CREATE TABLE IF NOT EXISTS character_daily_challenge_special_state (
+    character_id INTEGER PRIMARY KEY,
+    challenge_type INTEGER NOT NULL CHECK (challenge_type > 0),
+    target_value INTEGER NOT NULL CHECK (target_value > 0),
+    progress_value INTEGER NOT NULL DEFAULT 0
+        CHECK (progress_value >= 0 AND progress_value <= target_value),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS character_daily_challenge_special_progress_events (
+    character_id INTEGER NOT NULL,
+    source_event_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, source_event_id),
+    FOREIGN KEY (character_id) REFERENCES character_daily_challenge_special_state(character_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_daily_challenge_special_events_character
+    ON character_daily_challenge_special_progress_events(character_id, created_at);")),
         };
+
+        internal static int LatestVersion =>
+            Steps.Length == 0 ? 0 : Steps[Steps.Length - 1].Version;
 
         private static void MigrateEnchanterEndurance(SqliteConnection connection)
         {

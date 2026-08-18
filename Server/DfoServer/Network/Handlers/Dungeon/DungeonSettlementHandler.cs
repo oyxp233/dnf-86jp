@@ -544,6 +544,32 @@ namespace DfoServer.Network.Handlers.Dungeon
                     return false;
                 }
 
+                if (DungeonClearPresentationPolicy
+                        .UsesCommonExperienceAuthority(
+                            clearFact.PresentationKind)
+                    && !await ExecuteSettlementEffectAsync(
+                        session,
+                        run,
+                        identity,
+                        DungeonPersistentEffectKinds
+                            .SuitableDungeonDailyChallenge,
+                        async () =>
+                        {
+                            var questManager = session.GameSession?.QuestManager
+                                ?? throw new InvalidOperationException(
+                                    "Suitable-dungeon challenge requires a quest session.");
+                            await questManager
+                                .SyncSuitableDungeonDailyChallengeAsync(
+                                    run.DungeonId,
+                                    run.Difficulty,
+                                    settlement.PreviousLevel,
+                                    run.GetSettlementSourceEventId());
+                        }))
+                {
+                    run.Effects.TryFail(authoritativeReservation);
+                    return false;
+                }
+
                 _svc.PersistentMechanisms.ConfigureLinkedChallenge(run);
                 if (!await ExecuteSettlementEffectAsync(
                         session,

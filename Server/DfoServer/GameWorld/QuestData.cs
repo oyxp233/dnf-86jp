@@ -161,6 +161,33 @@ namespace DfoServer.GameWorld
             return NormalizeQuestTag(GetQuestFile(questId)?.Grade) == "challenge";
         }
 
+        internal static bool TryGetSuitableDungeonClearChallengeRule(
+            int questId,
+            out int minimumDifficulty)
+        {
+            minimumDifficulty = -1;
+            if (!IsDailyChallengeQuest(questId))
+                return false;
+
+            var quest = GetQuestFile(questId);
+            if (quest == null
+                || NormalizeQuestTag(quest.Type) != "condition under clear"
+                || quest.SubType != 6)
+            {
+                return false;
+            }
+
+            // Challenge clear conditions use the compact PVF layout
+            // <dungeon selector, minimum difficulty, clear count>. Selector -3
+            // is the client's canonical "recommended/suitable level dungeon".
+            var values = ParseIntList(quest.IntData);
+            if (values.Count < 3 || values[0] != -3 || values[2] <= 0)
+                return false;
+
+            minimumDifficulty = values[1];
+            return true;
+        }
+
         public static bool IsTitleRewardQuest(int questId)
         {
             var qst = GetQuestFile(questId);
@@ -460,6 +487,12 @@ namespace DfoServer.GameWorld
             int typeCode = MapTypeString(qst.Type);
             string typeTag = NormalizeQuestTag(qst.Type);
 
+            if (NormalizeQuestTag(qst.Grade) == "challenge"
+                && TryComputeDailyChallengeInitTrigger(qst, typeTag, out var challengeTrigger))
+            {
+                return challengeTrigger;
+            }
+
             if (IsSeekAndMeetNpcQuest(qst))
                 return ComputeSeekAndMeetNpcInitTrigger(qst.IntData);
 
@@ -496,6 +529,57 @@ namespace DfoServer.GameWorld
             }
 
             return 1;
+        }
+
+        private static bool TryComputeDailyChallengeInitTrigger(
+            QuestFile qst,
+            string typeTag,
+            out uint trigger)
+        {
+            trigger = 0;
+
+            // A few challenge QSTs keep their repeat count outside [int data].
+            // In particular, [disjoint item] uses sentinel values in int data and
+            // stores the actual target in [check count].
+            var checkCountNode = qst.Root?.GetChild("check count");
+            if (checkCountNode != null)
+            {
+                var checkCounts = ParseIntList(
+                    checkCountNode.GetFirstDataContent(qst.Content));
+                if (checkCounts.Count > 0 && checkCounts[0] > 0)
+                {
+                    trigger = (uint)checkCounts[0];
+                    return true;
+                }
+            }
+
+            var values = ParseIntList(qst.IntData);
+            switch (typeTag)
+            {
+                case "clear quest by grade":
+                case "use skill":
+                    if (values.Count >= 2 && values[1] > 0)
+                    {
+                        trigger = (uint)values[1];
+                        return true;
+                    }
+                    break;
+
+                case "condition under clear":
+                    // Sub type 6 is the repeated-clear challenge. Its compact
+                    // challenge schema is <dungeon selector, difficulty, count>,
+                    // unlike the four-column normal quest schema.
+                    if (qst.SubType == 6
+                        && values.Count >= 3
+                        && values[values.Count - 1] > 0)
+                    {
+                        trigger = (uint)values[values.Count - 1];
+                        return true;
+                    }
+                    break;
+            }
+
+            return false;
         }
 
         internal static uint ReplaceTriggerChannel(uint trigger, int channelIndex, long value)

@@ -205,6 +205,32 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
+            // [unlimited ...] 无限次使用道具（如无限猫头鹰 ID51）：校验物品存在后回成功 ACK，但不扣数量。
+            if (itemCode > 0 && IsUnlimitedUseStackable(itemCode))
+            {
+                var unlimitedUsable = false;
+                if (TryGetOwnedInventoryLease(session, cid, out lease))
+                {
+                    lock (lease.SyncRoot)
+                        unlimitedUsable = InventoryDeleteService.CanUseStackableForClient(
+                            lease.Inventory,
+                            listType,
+                            slotIndex,
+                            itemCode,
+                            out _);
+                }
+
+                if (unlimitedUsable)
+                {
+                    await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                        0x01,
+                        0x002C,
+                        UseStackableAckBuilder.BuildSuccess(slotIndex, (byte)listType, instanceValue, itemCode)));
+                    FileLogger.Log($"[{ProtocolName}] USE_STACKABLE: unlimited-use item 0x{itemCode:X8} at listType={listType} slot={slotIndex} acknowledged without consumption");
+                    return;
+                }
+            }
+
             var consumed = false;
             InventoryMutationResult result = null;
             if (TryGetOwnedInventoryLease(session, cid, out lease))
@@ -635,6 +661,26 @@ namespace DfoServer.Network.Handlers
             return listType == InventoryListType.Pet
                 && slotIndex >= 189
                 && slotIndex <= InventoryService.CreatureSlotEnd;
+        }
+
+        // PVF stackable type 为 [unlimited ...]（如 [unlimited waste]）的道具可永久使用，
+        // 服务端不得扣减数量。
+        internal static bool IsUnlimitedUseStackable(int itemTemplateId)
+        {
+            if (itemTemplateId <= 0)
+                return false;
+
+            try
+            {
+                var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+                return metadata != null
+                    && metadata.IsStackable
+                    && metadata.IsPrimaryStackableFamily("unlimited");
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         internal sealed class UseStackableResponsePlan

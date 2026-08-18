@@ -89,7 +89,10 @@ namespace DfoServer.Game.Inventory
                 ? 0
                 : CalculateVisibleSatiety(stomach, clampAliveMinimum: true);
 
-            SaveSatietyIfChanged(inventory, detail, before, after);
+            // 只在死亡时存库；未死亡时不写回、不推进调用方的时间锚点，
+            // 避免与随后的 ApplyDungeonElapsed 对同一区间重复扣减。
+            if (shouldDie)
+                SaveSatietyIfChanged(inventory, detail, before, after);
             return new PetCreatureSatietyUpdate(
                 inventory.CharacterId,
                 detail.Uid,

@@ -75,6 +75,8 @@ namespace DfoServer
             ("--selftest-quest-trigger-counts", SelfTests.QuestTriggerCountSelfTest.Run),
             ("--selftest-daily-challenge", SelfTests.DailyChallengeSelfTest.Run),
             ("--selftest-quest-chain-availability", SelfTests.QuestChainAvailabilitySelfTest.Run),
+            // 验证黑暗武士和缔造者不会获取普通职业的转职任务。
+            ("--selftest-special-profession-quest-policy", SelfTests.SpecialProfessionQuestPolicySelfTest.Run),
             ("--selftest-quest-ack-format", SelfTests.QuestAckFormatSelfTest.Run),
             ("--selftest-quest-notify-selection", SelfTests.QuestNotifySelectionSelfTest.Run),
             ("--selftest-clear-quest-list-packet", SelfTests.ClearQuestListPacketSelfTest.Run),

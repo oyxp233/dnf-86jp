@@ -15,6 +15,27 @@ namespace DfoServer.GameWorld
         internal static QuestFile GetQuestFile(int questId)
             => QuestCatalog.Get(questId);
 
+        // 黑暗武士(job 9)和缔造者(job 10)是独立职业，不应进入普通职业的
+        // 转职/一觉/二觉链。PVF 仍会把它们映射到女鬼剑士和男魔法师标签，
+        // 因此必须按 [job change quest] 类型额外拦截。
+        internal static bool IsProfessionQuestBlockedForJob(
+            int questId,
+            int characterJob)
+            => IsProfessionQuestBlockedForJob(
+                GetQuestFile(questId),
+                characterJob);
+
+        internal static bool IsProfessionQuestBlockedForJob(
+            QuestFile quest,
+            int characterJob)
+        {
+            if (quest == null || (characterJob != 9 && characterJob != 10))
+                return false;
+
+            return quest.JobChangeQuestValue >= 1
+                && quest.JobChangeQuestValue <= 3;
+        }
+
         private static Dictionary<int, HashSet<int>> LoadTrainingQuestNpcs()
         {
             var result = new Dictionary<int, HashSet<int>>();

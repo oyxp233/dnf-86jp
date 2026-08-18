@@ -82,6 +82,22 @@ namespace DfoServer.Game.Quests
                             if (!owner.IsCurrentInventoryOwner())
                                 return QuestAcceptResult.Fail(0x17);
 
+                            // 服务端再次校验，防止客户端绕过任务列表直接发送接取请求。
+                            var characterJob = LoadCharacterJob(
+                                connection,
+                                transaction,
+                                characterId);
+                            if (GameWorld.QuestData.IsProfessionQuestBlockedForJob(
+                                    questId,
+                                    characterJob))
+                            {
+                                FileLogger.Log(
+                                    $"[QuestAcceptanceApplicationService] ACCEPT " +
+                                    $"blocked profession quest: quest={questId} " +
+                                    $"cid={characterId} job={characterJob}");
+                                return QuestAcceptResult.Fail(21);
+                            }
+
                             var active = QuestRepository.LoadActiveQuests(
                                 connection,
                                 transaction,
@@ -254,6 +270,26 @@ namespace DfoServer.Game.Quests
                 $"committedTrigger={committedTrigger} " +
                 $"eventItems={eventItems.Count}");
             return result;
+        }
+
+        // 接取任务时以数据库中的职业为准，不信任客户端携带的角色状态。
+        private static int LoadCharacterJob(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText =
+                    "SELECT job FROM characters " +
+                    "WHERE character_id=@cid AND delete_flag=0";
+                command.Parameters.AddWithValue("@cid", characterId);
+                var value = command.ExecuteScalar();
+                return value == null || value == DBNull.Value
+                    ? -1
+                    : Convert.ToInt32(value);
+            }
         }
 
         private static int CountMainItemWithPendingRewards(

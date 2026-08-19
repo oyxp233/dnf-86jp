@@ -129,7 +129,7 @@ namespace DfoServer.SelfTests
                     CharacterId,
                     BuildFinishBody(LetterQuestId)));
             CheckBytes("finish success ack bytes",
-                "01-FA-07-00-AB-B4-00-00-A8-0C-00-00-00-00-01-00-00-00-00-00-00-A8-0C-00-00-00-00-00-00-00-00-00-00",
+                "01-FA-07-00-AB-B4-00-00-01-00-00-00-00-00-01-00-00-00-00-00-00-A8-0C-00-00-00-00-00-00-00-00-00-00",
                 finishOk,
                 ref failures);
 
@@ -508,13 +508,23 @@ ON CONFLICT(character_id, slot_index) DO UPDATE SET flag_value = @flag;";
                 FixedGoldCharacterId,
                 BuildFinishBody(FixedGoldQuestId));
             var ack = QuestAckBuilder.BuildFinish(finish);
-            var ackGold = ack != null && ack.Length >= 12
+            var ackCompletionCount = ack != null && ack.Length >= 12
                 ? BitConverter.ToUInt32(ack, 8)
                 : 0;
+            var ackGold = ack != null
+                && ack.Length >= 25
+                && ack[12] == 0
+                && ack[13] == 0
+                && ack[14] > 0
+                && BitConverter.ToUInt32(ack, 17) == 0
+                    ? BitConverter.ToUInt32(ack, 21)
+                    : 0;
             Check(
-                "fixed quest gold completion updates balance and finish ACK",
+                "finish ACK separates completion count from projected gold reward",
                 finish.Success
                     && finish.Gold == FixedGoldReward
+                    && finish.CompletionCount == 1
+                    && ackCompletionCount == 1
                     && ackGold == FixedGoldReward
                     && inventory.GetMainVirtualCount(0)?.Count
                         == beforeGold + (int)FixedGoldReward,

@@ -533,6 +533,7 @@ namespace DfoServer.Game.Quests
                 GrowthCapsuleExp = growthCapsuleExpReward,
                 TotalGrowthCapsuleExp = totalGrowthCapsuleExp,
                 Gold = goldReward,
+                CompletionCount = completionCount,
                 NewLevel = newLevel,
                 NewExp = newExp,
                 ChainType = reward.ChainType,

@@ -39,13 +39,31 @@ namespace DfoServer.Game.Quests
 
             var active = _repository.LoadActiveQuests(characterId);
             var activeQuest = QuestActiveListRules.FindByQuestId(active, questId);
+            var isDailyChallengeCompletion = false;
+            DailyChallengeEntryRewardState dailyChallengeEntry = null;
 
             if (activeQuest == null)
             {
-                FileLogger.Log(
-                    $"[QuestCompletionApplicationService] FINISH rejected: " +
-                    $"quest={questId} has no active activation, cid={characterId}");
-                return QuestFinishResult.Fail(22);
+                if (GameWorld.QuestData.IsDailyChallengeQuest(questId))
+                {
+                    dailyChallengeEntry = DailyChallengeRepository
+                        .LoadEntryRewardState(
+                            _connectionString,
+                            characterId,
+                            questId);
+                    isDailyChallengeCompletion = dailyChallengeEntry.CanClaim;
+                }
+
+                if (!isDailyChallengeCompletion)
+                {
+                    FileLogger.Log(
+                        $"[QuestCompletionApplicationService] FINISH rejected: " +
+                        $"quest={questId} has no claimable activation, " +
+                        $"cid={characterId} dailyFound={dailyChallengeEntry?.Found ?? false} " +
+                        $"dailyRemaining={dailyChallengeEntry?.RemainingValue ?? uint.MaxValue} " +
+                        $"dailyClaimed={dailyChallengeEntry?.Claimed ?? false}");
+                    return QuestFinishResult.Fail(22);
+                }
             }
 
             if (!GameWorld.QuestData.TryResolveCompletionDefinition(
@@ -74,7 +92,15 @@ namespace DfoServer.Game.Quests
 
             var isQuestionQuest = GameWorld.QuestData.IsQuestionQuest(questId);
             var clearedFlagValue = 1;
-            if (GameWorld.QuestData.IsQuestClearQuest(questId))
+            if (isDailyChallengeCompletion)
+            {
+                // The A14 client uses the normal cleared-quest projection to
+                // remember an individual challenge reward across relogs. The
+                // daily challenge repository removes these transient flags on
+                // rollover; they are not ordinary permanent quest completion.
+                clearedFlagValue = 1;
+            }
+            else if (GameWorld.QuestData.IsQuestClearQuest(questId))
             {
                 if (!QuestClearProgressRules.CanFinish(
                         _connectionString,
@@ -203,61 +229,97 @@ namespace DfoServer.Game.Quests
                             if (!owner.IsCurrentInventoryOwner())
                                 return QuestFinishResult.Fail(22);
 
-                            var transactionActive = QuestRepository.LoadActiveQuests(
-                                connection,
-                                transaction,
-                                characterId);
-                            var transactionQuest = QuestActiveListRules.FindByQuestId(
-                                transactionActive,
-                                questId);
-                            if (transactionQuest == null
-                                || !transactionQuest.ActivationId.Equals(
-                                    activeQuest.ActivationId))
+                            ActiveQuest transactionQuest = null;
+                            var transactionClearedFlagValue = clearedFlagValue;
+                            if (isDailyChallengeCompletion)
                             {
-                                return QuestFinishResult.Fail(22);
-                            }
-
-                            var transactionClearedFlagValue = 1;
-                            if (GameWorld.QuestData.IsQuestClearQuest(questId))
-                            {
-                                if (!QuestClearProgressRules.CanFinish(
+                                var transactionEntry = DailyChallengeRepository
+                                    .LoadEntryRewardState(
                                         connection,
                                         transaction,
                                         characterId,
-                                        questId))
+                                        questId);
+                                if (!transactionEntry.CanClaim
+                                    || transactionEntry.GroupIndex
+                                        != dailyChallengeEntry.GroupIndex
+                                    || transactionEntry.EntryIndex
+                                        != dailyChallengeEntry.EntryIndex
+                                    || transactionEntry.TargetValue
+                                        != dailyChallengeEntry.TargetValue
+                                    || !DailyChallengeRepository
+                                        .TryMarkEntryRewardClaimed(
+                                            connection,
+                                            transaction,
+                                            characterId,
+                                            transactionEntry))
                                 {
                                     return QuestFinishResult.Fail(22);
                                 }
+                                QuestRepository.MarkQuestCleared(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    questId,
+                                    clearedFlagValue);
                             }
-                            else if (isQuestionQuest)
+                            else
                             {
-                                if (!TryResolveQuestionQuestClearFlagValue(
-                                        questId,
-                                        transactionQuest,
-                                        hasRewardSelection,
-                                        rewardSelectionIndex,
-                                        out transactionClearedFlagValue))
+                                var transactionActive = QuestRepository.LoadActiveQuests(
+                                    connection,
+                                    transaction,
+                                    characterId);
+                                transactionQuest = QuestActiveListRules.FindByQuestId(
+                                    transactionActive,
+                                    questId);
+                                if (transactionQuest == null
+                                    || !transactionQuest.ActivationId.Equals(
+                                        activeQuest.ActivationId))
                                 {
                                     return QuestFinishResult.Fail(22);
                                 }
-                            }
-                            else if (transactionQuest.TriggerValue != 0)
-                            {
-                                return QuestFinishResult.Fail(22);
+
+                                transactionClearedFlagValue = 1;
+                                if (GameWorld.QuestData.IsQuestClearQuest(questId))
+                                {
+                                    if (!QuestClearProgressRules.CanFinish(
+                                            connection,
+                                            transaction,
+                                            characterId,
+                                            questId))
+                                    {
+                                        return QuestFinishResult.Fail(22);
+                                    }
+                                }
+                                else if (isQuestionQuest)
+                                {
+                                    if (!TryResolveQuestionQuestClearFlagValue(
+                                            questId,
+                                            transactionQuest,
+                                            hasRewardSelection,
+                                            rewardSelectionIndex,
+                                            out transactionClearedFlagValue))
+                                    {
+                                        return QuestFinishResult.Fail(22);
+                                    }
+                                }
+                                else if (transactionQuest.TriggerValue != 0)
+                                {
+                                    return QuestFinishResult.Fail(22);
+                                }
+
+                                if (!QuestRepository.TryDeleteActiveQuestCas(
+                                    connection,
+                                    transaction,
+                                    characterId,
+                                    questId,
+                                    transactionQuest.ActivationId,
+                                    transactionQuest.Version,
+                                    transactionQuest.TriggerValue))
+                                {
+                                    return QuestFinishResult.Fail(22);
+                                }
                             }
                             clearedFlagValue = transactionClearedFlagValue;
-
-                            if (!QuestRepository.TryDeleteActiveQuestCas(
-                                connection,
-                                transaction,
-                                characterId,
-                                questId,
-                                transactionQuest.ActivationId,
-                                transactionQuest.Version,
-                                transactionQuest.TriggerValue))
-                            {
-                                return QuestFinishResult.Fail(22);
-                            }
 
                             var goldCarryLimit = CharacterGoldLimitRepository
                                 .LoadEffectiveGoldCarryLimit(
@@ -372,7 +434,8 @@ namespace DfoServer.Game.Quests
                                     reward.GrowNumber);
                             }
 
-                            if (!completionDefinition.IsRepeatable)
+                            if (!isDailyChallengeCompletion
+                                && !completionDefinition.IsRepeatable)
                             {
                                 QuestRepository.MarkQuestCleared(
                                     connection,
@@ -381,10 +444,13 @@ namespace DfoServer.Game.Quests
                                     questId,
                                     clearedFlagValue);
                             }
-                            QuestClearProgressRules.SynchronizeActiveParents(
-                                connection,
-                                transaction,
-                                characterId);
+                            if (!isDailyChallengeCompletion)
+                            {
+                                QuestClearProgressRules.SynchronizeActiveParents(
+                                    connection,
+                                    transaction,
+                                    characterId);
+                            }
 
                             newExp = currentExp
                                 ?? GetCharacterExp(
@@ -454,6 +520,7 @@ namespace DfoServer.Game.Quests
 
             FileLogger.Log(
                 $"[QuestCompletionApplicationService] FINISH quest={questId} " +
+                $"source={(isDailyChallengeCompletion ? "daily-challenge" : "active-quest")} " +
                 $"rewardIdx={rewardSelectionIndex} count={completionCount} " +
                 $"flag={clearedFlagValue} gold={goldReward} " +
                 $"consumed={consumedEntries.Count} rewarded={insertedEntries.Count}");
@@ -466,6 +533,7 @@ namespace DfoServer.Game.Quests
                 GrowthCapsuleExp = growthCapsuleExpReward,
                 TotalGrowthCapsuleExp = totalGrowthCapsuleExp,
                 Gold = goldReward,
+                CompletionCount = completionCount,
                 NewLevel = newLevel,
                 NewExp = newExp,
                 ChainType = reward.ChainType,

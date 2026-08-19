@@ -890,14 +890,6 @@ namespace DfoServer.Network
                         await _inventoryRefreshSender.SendUpdateItemList(s, pair.Key, pair.Value);
                 }
 
-                if (result?.Snapshot != null)
-                {
-                    await s.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                        0x00,
-                        0x0286,
-                        DailyChallengeBodyBuilder.Build(result.Snapshot)));
-                }
-
                 FileLogger.Log(
                     $"[GameProtocol] DAILY_CHALLENGE_REWARD cid={s.Player?.CharacterId ?? 0} "
                     + $"group={result?.GroupIndex ?? -1} status={result?.Status.ToString() ?? "null"} "

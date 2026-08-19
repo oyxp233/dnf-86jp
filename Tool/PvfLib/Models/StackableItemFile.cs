@@ -556,7 +556,8 @@ namespace PvfLib
             // [upgradable legacy] pots store rewards as itemId/weight/count triples in [int data].
             for (var i = 0; i + 2 < ints.Count; i += 3)
             {
-                if (ints[i] <= 0)
+                // itemId=0 是 PVF 约定的金币奖励，不是空项；负数才是无效物品编号。
+                if (ints[i] < 0)
                     continue;
 
                 rewards.Add(new BoosterRewardEntry

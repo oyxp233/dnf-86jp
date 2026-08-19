@@ -55,7 +55,9 @@ namespace DfoServer.Network.Builders
             w.WriteUInt16(r.QuestId);
             w.WriteByte(0x00); // completionType=0 (type 0/25)
             w.WriteUInt32(r.Exp);
-            w.WriteUInt32(r.Gold);
+            // 客户端将此字段作为任务完成事件的发生次数继续投影到
+            // 挑战任务系统。金币已在下面的 itemId=0 奖励记录中下发。
+            w.WriteUInt32(r.CompletionCount);
 
             w.WriteByte((byte)r.ConsumedEntries.Count);
             foreach (var ce in r.ConsumedEntries)

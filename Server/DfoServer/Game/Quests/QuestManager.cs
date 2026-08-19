@@ -24,6 +24,8 @@ namespace DfoServer.Game.Quests
         private readonly string _connStr;
         private readonly QuestService _service;
         private readonly DailyChallengeService _dailyChallengeService;
+        private readonly DailyChallengeRewardApplicationService
+            _dailyChallengeRewards;
         private readonly ImageCommunicationApplicationService
             _imageCommunicationService;
         private readonly QuestNotifySelectionService _notifySelectionService;
@@ -57,6 +59,8 @@ namespace DfoServer.Game.Quests
             _clock = clock ?? throw new ArgumentNullException(nameof(clock));
             _service = new QuestService(connStr);
             _dailyChallengeService = new DailyChallengeService(connStr);
+            _dailyChallengeRewards =
+                new DailyChallengeRewardApplicationService(connStr);
             _imageCommunicationService =
                 new ImageCommunicationApplicationService(connStr);
             _notifySelectionService = new QuestNotifySelectionService(connStr);
@@ -171,6 +175,10 @@ namespace DfoServer.Game.Quests
             var qBody = StripEcho(body);
             int cid = _sender.CharacterId;
             if (cid <= 0) return;
+            FileLogger.Log(
+                $"[GameProtocol] FINISH_QUEST payload: "
+                + $"{(qBody != null ? BitConverter.ToString(qBody) : "null")} "
+                + $"({qBody?.Length ?? 0}B) cid={cid}");
             InventoryContext.TryGetOwnedLease(sessionId, cid, out var lease);
             var owner = new QuestCommandOwnerContext(
                 cid,
@@ -245,6 +253,63 @@ namespace DfoServer.Game.Quests
             return result;
         }
 
+        internal async Task SyncSuitableDungeonDailyChallengeAsync(
+            int dungeonId,
+            int difficulty,
+            int characterLevel,
+            Guid sourceEventId)
+        {
+            var characterId = _sender.CharacterId;
+            if (characterId <= 0)
+                return;
+
+            var result = _dailyChallengeService.ApplySuitableDungeonClear(
+                characterId,
+                dungeonId,
+                difficulty,
+                characterLevel,
+                sourceEventId);
+            if (!result.HasRelevantProgress)
+                return;
+
+            // 0x0286 rebuilds the client's challenge manager, including the
+            // special-progress token vector.  Publish it for ordinary progress
+            // and for idempotent recovery before any edge-triggered 0x0287;
+            // sending an empty/stale snapshot after 0x0287 erases the new token.
+            if (result.ChangedEntries > 0 || !result.SpecialChanged)
+            {
+                await _sender.SendNotiAsync(
+                    0x0286,
+                    DailyChallengeBodyBuilder.Build(result.Snapshot));
+            }
+
+            // 0x0287 is solely the special clear event.  Its uint32 is a stable,
+            // deduplicated completion token, not the dungeon index or accumulated
+            // count.  The snapshot projection derives the same tokens from the
+            // durable scalar, so reconnects and retries converge without loss.
+            if (result.SpecialChanged)
+            {
+                var tokens = DailyChallengeBodyBuilder
+                    .ResolveSpecialProgressTailIds(result.Snapshot);
+                if (tokens.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Committed special challenge progress has no client token.");
+                }
+
+                var completionToken = tokens[tokens.Count - 1];
+                var clearDungeonBody = DailyChallengeClearDungeonBodyBuilder.Build(
+                    completionToken);
+                await _sender.SendNotiAsync(
+                    0x0287,
+                    clearDungeonBody);
+                FileLogger.Log(
+                    $"[DailyChallenge] CLEAR_DUNGEON_NOTI cid={characterId} "
+                    + $"type=0x0287 dungeon={dungeonId} token={completionToken} body="
+                    + BitConverter.ToString(clearDungeonBody));
+            }
+        }
+
         internal DailyChallengeRewardClaimResult HandleDailyChallengeReward(
             Guid sessionId,
             byte[] body)
@@ -268,11 +333,15 @@ namespace DfoServer.Game.Quests
                     null);
             }
 
-            return _dailyChallengeService.ClaimReward(
+            var owner = new QuestCommandOwnerContext(
                 characterId,
-                _sender.Player?.Level ?? 0,
-                groupIndex,
+                _sender.AccountId,
+                sessionId,
                 lease);
+            return _dailyChallengeRewards.Claim(
+                owner,
+                _sender.Player?.Level ?? 0,
+                groupIndex);
         }
 
         public async Task HandleFinishQuestAsync(

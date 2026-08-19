@@ -14,11 +14,13 @@ namespace DfoServer.Game.Lottery
         private readonly LotteryItemDefinitionProvider _definitions;
         private readonly LotteryDoubleRewardPolicy _doubleRewardPolicy;
         private readonly IncreaseChanceLotteryProgressRepository _progressRepository;
+        private readonly Func<int, int> _goldCarryLimitLoader;
 
         public LotteryItemOpenService(
             string connectionString,
             LotteryItemDefinitionProvider definitions,
-            LotteryDoubleRewardPolicy doubleRewardPolicy)
+            LotteryDoubleRewardPolicy doubleRewardPolicy,
+            Func<int, int> goldCarryLimitLoader = null)
         {
             _connectionString = !string.IsNullOrWhiteSpace(connectionString)
                 ? connectionString
@@ -28,6 +30,8 @@ namespace DfoServer.Game.Lottery
             _doubleRewardPolicy = doubleRewardPolicy
                 ?? throw new ArgumentNullException(nameof(doubleRewardPolicy));
             _progressRepository = new IncreaseChanceLotteryProgressRepository(_connectionString);
+            _goldCarryLimitLoader = goldCarryLimitLoader
+                ?? InventoryGoldCarryLimitLoader.Load;
         }
 
         internal bool CanOpen(
@@ -136,8 +140,17 @@ namespace DfoServer.Game.Lottery
             if (selectedRewards.Count == 0)
                 return false;
 
-            var regularRequests = InventorySpecialConsumableService.BuildRewardRequests(
-                AggregateRewardEntries(selectedRewards, 1));
+            var regularRewards = AggregateRewardEntries(selectedRewards, 1).ToList();
+            var regularGoldReward = SumGoldRewards(regularRewards);
+            if (!CanGrantGoldReward(
+                    inventory.CharacterId,
+                    currentGold,
+                    definition.GoldCost,
+                    regularGoldReward))
+            {
+                return false;
+            }
+            var regularRequests = BuildLotteryRewardRequests(regularRewards);
             if (definition.UsesIncreaseChanceProgress)
                 useDoubleReward = false;
             var effectiveOverflowSink = definition.UsesIncreaseChanceProgress
@@ -160,8 +173,17 @@ namespace DfoServer.Game.Lottery
             var deliveredToMailbox = regularDeliveredToMailbox;
             if (useDoubleReward && CanAttemptDoubleReward(inventory.CharacterId, inventory.AccountId))
             {
-                var doubleRequests = InventorySpecialConsumableService.BuildRewardRequests(
-                    AggregateRewardEntries(selectedRewards, 2));
+                var doubleRewards = AggregateRewardEntries(selectedRewards, 2).ToList();
+                var doubleGoldReward = SumGoldRewards(doubleRewards);
+                if (!CanGrantGoldReward(
+                        inventory.CharacterId,
+                        currentGold,
+                        definition.GoldCost,
+                        doubleGoldReward))
+                {
+                    return false;
+                }
+                var doubleRequests = BuildLotteryRewardRequests(doubleRewards);
                 if (!TryPlanOnlineOpen(
                         inventory,
                         source,
@@ -248,6 +270,10 @@ namespace DfoServer.Game.Lottery
                 AddMailboxGrantResults(regularRequests, openResult.Rewards);
             else
                 AddOnlineGrantResults(inventory, grantBatch, openResult.Rewards);
+            openResult.GrantedGold = openResult.Rewards
+                .Where(reward => reward != null && reward.ItemTemplateId == 0)
+                .Sum(reward => Math.Max(0, reward.GrantedCount));
+            openResult.UpdatedGold = inventory.CountMainItem(0);
             if (definition.UsesIncreaseChanceProgress)
             {
                 var rewardIndex = FindRewardIndex(definition.RewardPool, selectedRewards[0]);
@@ -370,6 +396,13 @@ namespace DfoServer.Game.Lottery
 
             if (InventoryRewardGrantService.TryPlanBatch(planningInventory, requests, out plan))
                 return true;
+
+            // 金币是虚拟背包槽，达到携带上限时不能转投邮件；必须拒绝且保留罐子。
+            if (requests != null
+                && requests.Any(request => request != null && request.ItemTemplateId == 0))
+            {
+                return false;
+            }
 
             overflowSink = overflowSink ?? RejectingInventoryOverflowRewardSink.Instance;
             if (overflowSink is MailboxInventoryOverflowRewardSink mailboxSink)
@@ -511,14 +544,63 @@ namespace DfoServer.Game.Lottery
             int multiplier)
         {
             return rewards
-                .Where(reward => reward != null && reward.ItemId > 0 && reward.Count > 0)
+                .Where(reward => reward != null && reward.ItemId >= 0 && reward.Count > 0)
                 .GroupBy(reward => new { reward.ItemId, reward.UsablePeriodDays })
                 .Select(group => new PvfLib.BoosterRewardEntry
                 {
                     ItemId = group.Key.ItemId,
-                    Count = group.Sum(reward => Math.Max(1, reward.Count)) * Math.Max(1, multiplier),
+                    Count = (int)Math.Min(
+                        int.MaxValue,
+                        group.Sum(reward => (long)Math.Max(1, reward.Count))
+                            * Math.Max(1L, multiplier)),
                     UsablePeriodDays = group.Key.UsablePeriodDays,
                 });
+        }
+
+        private static List<InventoryRewardGrantRequest> BuildLotteryRewardRequests(
+            IReadOnlyList<PvfLib.BoosterRewardEntry> rewards)
+        {
+            var requests = InventorySpecialConsumableService.BuildRewardRequests(
+                (rewards ?? Array.Empty<PvfLib.BoosterRewardEntry>())
+                    .Where(reward => reward != null && reward.ItemId > 0));
+            var goldReward = SumGoldRewards(rewards);
+            if (goldReward > 0)
+            {
+                // itemId=0 复用主背包虚拟金币槽，和普通奖励一起原子提交。
+                requests.Insert(
+                    0,
+                    InventoryRewardGrantRequest.Create(
+                        0,
+                        goldReward,
+                        ItemCreateReason.PackageOpen));
+            }
+            return requests;
+        }
+
+        private bool CanGrantGoldReward(
+            int characterId,
+            int currentGold,
+            int goldCost,
+            int goldReward)
+        {
+            if (goldReward <= 0)
+                return true;
+
+            var goldAfterCost = Math.Max(0L, (long)currentGold - Math.Max(0, goldCost));
+            var carryLimit = Math.Max(0, _goldCarryLimitLoader(characterId));
+            return goldAfterCost + goldReward <= carryLimit;
+        }
+
+        private static int SumGoldRewards(
+            IEnumerable<PvfLib.BoosterRewardEntry> rewards)
+        {
+            if (rewards == null)
+                return 0;
+
+            var total = rewards
+                .Where(reward => reward != null && reward.ItemId == 0)
+                .Sum(reward => (long)Math.Max(0, reward.Count));
+            return (int)Math.Min(int.MaxValue, total);
         }
 
         private static void AddOnlineGrantResults(

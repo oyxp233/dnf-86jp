@@ -47,7 +47,9 @@ namespace DfoServer.Game.Inventory
             if (!HasEnoughMaterials(inventory, materials))
                 return Fail(result, 21);
 
-            var rewardRequests = BuildRewardRequests(outputs);
+            TryResolveUpgradeAttributeSource(inventory, materials, outputs, out var attributeSource);
+
+            var rewardRequests = BuildRewardRequests(outputs, attributeSource);
             var totalGoldCost = (long)recipe.GoldCost * request.RequestedCount;
             if (totalGoldCost < 0 || totalGoldCost > int.MaxValue)
                 return Fail(result, 17);
@@ -313,16 +315,104 @@ namespace DfoServer.Game.Inventory
                 .ToList();
         }
 
-        private static List<InventoryRewardGrantRequest> BuildRewardRequests(
-            IReadOnlyList<CompoundItemRecipeEntry> outputs)
+        internal static List<InventoryRewardGrantRequest> BuildRewardRequests(
+            IReadOnlyList<CompoundItemRecipeEntry> outputs,
+            ItemCore attributeSource)
         {
             var requests = new List<InventoryRewardGrantRequest>();
             foreach (var output in outputs)
-                requests.Add(InventoryRewardGrantRequest.Create(
-                    output.ItemTemplateId,
-                    output.Count,
-                    ItemCreateReason.Unknown));
+            {
+                var request = TryBuildAttributeTransferredRequest(output, attributeSource)
+                    ?? InventoryRewardGrantRequest.Create(
+                        output.ItemTemplateId,
+                        output.Count,
+                        ItemCreateReason.Unknown);
+                requests.Add(request);
+            }
             return requests;
+        }
+
+        internal static InventoryRewardGrantRequest TryBuildAttributeTransferredRequest(
+            CompoundItemRecipeEntry output,
+            ItemCore attributeSource)
+        {
+            if (attributeSource == null
+                || output.Count != 1
+                || !ItemMetadataResolver.TryResolveItemKind(output.ItemTemplateId, out var outputKind)
+                || outputKind != ItemCore.KindEquipment)
+                return null;
+
+            if (!InventoryCreateService.TryCreateCore(
+                    output.ItemTemplateId,
+                    ItemCreateReason.Unknown,
+                    output.Count,
+                    out var freshCore)
+                || freshCore == null)
+                return null;
+
+            ApplyUpgradeAttributes(freshCore, attributeSource);
+            return InventoryRewardGrantRequest.Existing(
+                freshCore,
+                output.Count,
+                ItemCreateReason.Unknown);
+        }
+
+        internal static void ApplyUpgradeAttributes(ItemCore target, ItemCore source)
+        {
+            target.Upgrade = source.Upgrade;
+            target.AmplifyType = source.AmplifyType;
+            target.AmplifyValue = source.AmplifyValue;
+            target.GenuineUpgrade = source.GenuineUpgrade;
+            target.EnchantCardId = source.EnchantCardId;
+            target.EnchantUpgradeCount = source.EnchantUpgradeCount;
+        }
+
+        internal static void TryResolveUpgradeAttributeSource(
+            InventoryService inventory,
+            IReadOnlyList<CompoundItemRecipeEntry> materials,
+            IReadOnlyList<CompoundItemRecipeEntry> outputs,
+            out ItemCore attributeSource)
+        {
+            attributeSource = null;
+            if (inventory == null || materials == null || outputs == null)
+                return;
+
+            CompoundItemRecipeEntry equipmentMaterial = null;
+            foreach (var material in materials)
+            {
+                if (material.Count != 1
+                    || !ItemMetadataResolver.TryResolveItemKind(material.ItemTemplateId, out var materialKind)
+                    || materialKind != ItemCore.KindEquipment)
+                    continue;
+                if (equipmentMaterial != null)
+                    return;
+                equipmentMaterial = material;
+            }
+            if (equipmentMaterial == null)
+                return;
+
+            var equipmentOutputCount = 0;
+            foreach (var output in outputs)
+            {
+                if (output.Count != 1
+                    || !ItemMetadataResolver.TryResolveItemKind(output.ItemTemplateId, out var outputKind)
+                    || outputKind != ItemCore.KindEquipment)
+                    continue;
+                equipmentOutputCount++;
+            }
+            if (equipmentOutputCount != 1)
+                return;
+
+            foreach (var pair in inventory.GetItems(InventoryListType.Main))
+            {
+                var core = pair.Value;
+                if (core == null || core.ItemId != equipmentMaterial.ItemTemplateId)
+                    continue;
+                if (InventoryStackRuleService.IsStackable(core))
+                    continue;
+                attributeSource = core.Copy();
+                return;
+            }
         }
 
         private static void AddRewardResults(
